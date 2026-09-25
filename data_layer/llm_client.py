@@ -194,6 +194,14 @@ def _read_stream(response: requests.Response) -> dict[str, Any]:
                 reasoning.append(thought)
             finish_reason = choice.get("finish_reason") or finish_reason
 
+    if finish_reason is None:
+        # Every completed stream from Build carries a finish_reason. Without
+        # one the stream was cut short - live, Build closed streams after
+        # ~1s with no content at all, which callers then saw as an empty
+        # reply instead of a retryable drop.
+        raise requests.exceptions.ChunkedEncodingError(
+            f"stream ended without a finish_reason after {len(''.join(content))} content chars"
+        )
     message: dict[str, Any] = {"role": "assistant", "content": "".join(content)}
     if reasoning:
         message["reasoning_content"] = "".join(reasoning)

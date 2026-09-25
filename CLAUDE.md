@@ -15,7 +15,7 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # Windows
 # .venv/bin/python -m pip install -r requirements.txt     # if ever run on Linux (e.g. Oracle A1)
 
-.venv/Scripts/python -m pytest              # full suite (80 tests)
+.venv/Scripts/python -m pytest              # full suite (81 tests)
 .venv/Scripts/python -m pytest -q tests/test_alpaca_client.py   # single file
 .venv/Scripts/python -m pytest -k relative_volume                # by name
 
@@ -93,6 +93,12 @@ Per-source clients, each a thin subclass of `BaseClient`:
 **Known limitation:** `AlpacaClient.get_relative_volume` treats the most recent daily bar as "today", so a run during market hours compares a partial day against full-day averages and understates relative volume. Runs so far were pre-market, where it's correct.
 
 **Analyst agent is done and live-verified** (Sept 25, 2026): both analyst roles return valid, evidence-checked verdicts on real context. Per-call time is ~20–50s when Build is healthy, but under load Build drops connections before sending headers and a single call took 335s through four retries — budget minutes, not seconds, per cycle.
+
+**Consistency test (Sept 25, 2026, 2–5 day horizon, temperature 0.2):** each analyst ran 5× on identical frozen contexts for AAPL/MSFT/NVDA (33 calls, ~273k tokens, 71 min wall time with the two analysts in parallel). Findings that should shape the next steps:
+- **Reliability is the biggest problem.** 7 of 30 analyst runs failed. `gpt-oss-20b` failed 5 of 15, every one after ~400s of exhausted connection retries, and its successful calls took 65–400s. `nemotron-3-super` failed 2 of 15: once malformed JSON (a missing quote; the correction turn reproduced the identical error at the identical character, so the correction turn is ineffective for this failure), and once a stream Build closed with no content and no finish_reason (now retried as a drop in `llm_client._read_stream`).
+- **Same input, different recommendations.** 4 of 6 stock×analyst cells were mixed across repeats (e.g. MSFT: analyst_1 hold×3/buy×1, analyst_2 buy×3/hold×1). Only AAPL×analyst_2 (5/5 buy) and NVDA×analyst_1 (3/3 buy) were stable. A single run's verdict on a borderline stock is partly sampling noise.
+- **Confidence scales differ by model.** analyst_1 means 0.61–0.69, analyst_2 0.66–0.74; within-cell stdev 0.03–0.07. A shared absolute 0.66 floor sits in the middle of gpt-oss's range, so it mostly measures which model is more cautious, not the evidence.
+- **Grounding held up:** 115/115 evidence citations verified, zero wrong-index, and every successful run filled `data_concerns`.
 
 **Not built yet:** the analyst cross-check/abort logic, critic loop, bias/technical agents, end-to-end pipeline orchestration, Oracle A1 deployment.
 

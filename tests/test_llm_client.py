@@ -211,3 +211,13 @@ def test_dropped_stream_gives_up_after_retry_budget(monkeypatch):
     with pytest.raises(requests.exceptions.ChunkedEncodingError):
         client.chat_completion("some/model", [{"role": "user", "content": "hi"}])
     assert len(session.calls) == 3  # first try + STREAM_RETRIES
+
+
+def test_stream_without_finish_reason_is_retried_as_a_drop(monkeypatch):
+    monkeypatch.setattr("data_layer.llm_client.time.sleep", lambda s: None)
+    truncated = _sse([{"id": "c1", "choices": [{"delta": {"role": "assistant"}}]}])  # then [DONE]
+    session = _FakeSession(_completion_payload(), streams=[truncated, _sse(_stream_chunks("ok"))])
+    client = LlmClient(settings=_settings(), session=session)
+
+    assert client.complete_text("some/model", [{"role": "user", "content": "hi"}]) == "ok"
+    assert len(session.calls) == 2
