@@ -7,7 +7,8 @@
 
 Writes the trace to logs/trace-<UTC date>.jsonl. Without --analysts it
 prints each symbol's analyst-facing context block; with them, a one-line
-verdict per analyst per symbol.
+verdict per analyst per symbol, plus the cross-check outcome when both
+analyst_1 and analyst_2 ran.
 """
 from __future__ import annotations
 
@@ -19,8 +20,11 @@ from data_layer import AlpacaClient, DiskCache, EdgarClient, FinnhubClient, Fred
 from data_layer.llm_client import LlmClient
 
 from .analyst_agent import AnalystAgent, AnalystVerdict
+from .cross_check import cross_check
 from .macro_agent import MacroContextAgent
 from .trace import TraceLogger
+
+CROSS_CHECK_ROLES = {"analyst_1", "analyst_2"}
 
 
 def _summary(v: AnalystVerdict) -> str:
@@ -70,8 +74,15 @@ def main() -> None:
             print(ctx.to_prompt())
             print()
             continue
+        verdicts = {}
         for analyst in analysts:
-            print(_summary(analyst.analyze(ctx)), flush=True)
+            verdicts[analyst.role] = analyst.analyze(ctx)
+            print(_summary(verdicts[analyst.role]), flush=True)
+        if CROSS_CHECK_ROLES <= verdicts.keys():
+            result = cross_check(*(verdicts[r] for r in sorted(CROSS_CHECK_ROLES)), trace=trace)
+            print(f"{ctx.symbol} cross-check: {result.outcome.upper()}"
+                  f"{f' ({result.recommendation})' if result.recommendation else ''} - {result.reason}",
+                  flush=True)
     print(f"trace: {trace.path}")
 
 

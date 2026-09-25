@@ -131,7 +131,7 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 
 - Model-to-agent assignment is now decided (section 4) but not yet battle-tested against real traffic — revisit if any model turns out unavailable/slower than expected once agents are actually built.
 - **Decided (Sept 25):** positions are long-only in real shares — no shorting, derivatives, leverage or negotiated deals.
-- **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). No confidence floor: tested and dropped, since the two models report confidence on different scales. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once.
+- **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). No confidence floor: tested and dropped, since the two models report confidence on different scales. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once. Implemented in `agents/cross_check.py`; hold vs avoid (not explicitly decided) aborts under strict matching, which only matters for a stock already held.
 - **Decided (Sept 25):** analyst horizon is the next 2–5 trading days, a forward projection judged only from data available now, so the ~2-day paper run can test the calls on camera.
 - Should decisions be executed on the Alpaca paper account, or only logged?
 - Final list of the three stocks?

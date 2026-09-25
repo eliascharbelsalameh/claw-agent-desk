@@ -96,6 +96,8 @@ class AnalystVerdict:
     evidence: list[dict[str, Any]] = field(default_factory=list)
     data_concerns: list[str] = field(default_factory=list)
     evidence_check: dict[str, int] = field(default_factory=dict)
+    # Quote fixes applied to the reply's JSON before it parsed (empty = none).
+    json_repairs: list[str] = field(default_factory=list)
     error: str | None = None
 
     @property
@@ -111,20 +113,88 @@ class AnalystVerdict:
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
 
 
-def extract_json_object(text: str) -> dict[str, Any]:
+def extract_json_object(text: str, repairs: list[str] | None = None) -> dict[str, Any]:
     """The outermost {...} in a reply, tolerating code fences and stray
-    prose around it. Raises ValueError if there is no parseable object."""
+    prose around it. Raises ValueError if there is no parseable object.
+
+    If the JSON doesn't parse, repair_json_quotes gets one try; when that
+    produces valid JSON, a description of each fix is appended to `repairs`
+    (if given) so the caller can log exactly what was changed.
+    """
     text = _FENCE_RE.sub("", text.strip())
     start, end = text.find("{"), text.rfind("}")
     if start == -1 or end <= start:
         raise ValueError("no JSON object found in reply")
+    body = text[start : end + 1]
     try:
-        obj = json.loads(text[start : end + 1])
+        obj = json.loads(body)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON: {exc}") from exc
+        repaired, fixes = repair_json_quotes(body)
+        try:
+            obj = json.loads(repaired) if fixes else None
+        except json.JSONDecodeError:
+            obj = None
+        if obj is None:
+            raise ValueError(f"invalid JSON: {exc}") from exc
+        if repairs is not None:
+            repairs.extend(fixes)
     if not isinstance(obj, dict):
         raise ValueError("reply JSON is not an object")
     return obj
+
+
+# `"key": value` on one line, as models pretty-print their JSON.
+_KEY_VALUE_RE = re.compile(r'^(\s*"[^"\\]+"\s*:\s*)(.*?)\s*$')
+# A value that is already valid JSON syntax at its start.
+_JSON_VALUE_START_RE = re.compile(r'^(["\[{]|-?\d|true\b|false\b|null\b)')
+
+
+def _has_closing_quote(line: str) -> bool:
+    """For a line starting with '"', whether an unescaped closing quote follows."""
+    escaped = False
+    for ch in line[1:]:
+        if escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped = True
+        elif ch == '"':
+            return True
+    return False
+
+
+def repair_json_quotes(body: str) -> tuple[str, list[str]]:
+    """Add the quotes a model left off string values, and nothing else.
+
+    nemotron-3-super repeatedly emitted exactly these shapes (5 of 38
+    replies on Sept 25, 2026, and its correction turn reproduced them
+    character for character):
+      "why": Indicates strong growth.        <- both quotes missing
+      "why": Indicates strong growth."       <- opening quote missing
+      "Continued heavy AI capex could ...    <- list item never closed
+    Only whole lines are touched and no word of the content changes; the
+    caller re-parses and re-validates, so a wrong guess fails as before.
+    """
+    lines = body.split("\n")
+    fixes: list[str] = []
+    for i, line in enumerate(lines):
+        match = _KEY_VALUE_RE.match(line)
+        if match:
+            prefix, value = match.groups()
+            if not value or _JSON_VALUE_START_RE.match(value):
+                continue
+            comma = value.endswith(",")
+            inner = value[:-1].rstrip() if comma else value
+            if inner.endswith('"') and not inner.endswith('\\"'):
+                inner = inner[:-1]
+            lines[i] = prefix + json.dumps(inner, ensure_ascii=False) + ("," if comma else "")
+            fixes.append(f"line {i + 1}: quoted the unquoted value of {prefix.strip().rstrip(':').strip()}")
+            continue
+        stripped = line.strip()
+        if stripped.startswith('"') and not _has_closing_quote(stripped):
+            following = next((l.strip() for l in lines[i + 1 :] if l.strip()), "")
+            lines[i] = line.rstrip() + ('"' if following.startswith(("]", "}")) else '",')
+            fixes.append(f"line {i + 1}: closed an unterminated string")
+    return "\n".join(lines), fixes
 
 
 def _str_list(obj: dict[str, Any], key: str, required: bool) -> list[str]:
@@ -342,10 +412,11 @@ class AnalystAgent:
                     "usage": response.get("usage"),
                 },
             )
+            repairs: list[str] = []
             try:
                 if not content.strip():
                     raise ValueError(f"empty reply (finish_reason={finish_reason})")
-                fields = validate_verdict(extract_json_object(content))
+                fields = validate_verdict(extract_json_object(content, repairs))
             except ValueError as exc:
                 verdict.error = f"unparseable verdict: {exc}"
                 self._log("verdict_invalid", {**base, "problem": str(exc)})
@@ -362,8 +433,11 @@ class AnalystAgent:
                 ]
                 continue
 
+            if repairs:
+                self._log("verdict_repaired", {**base, "repairs": repairs})
             for key, value in fields.items():
                 setattr(verdict, key, value)
+            verdict.json_repairs = repairs
             verdict.evidence_check = check_evidence(verdict.evidence, ctx.facts())
             verdict.error = None
             self._log("verdict", verdict.to_dict())

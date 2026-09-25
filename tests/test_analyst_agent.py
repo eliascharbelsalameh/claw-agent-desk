@@ -9,6 +9,7 @@ from agents.analyst_agent import (
     AnalystAgent,
     check_evidence,
     extract_json_object,
+    repair_json_quotes,
     resolve_fact_path,
     validate_verdict,
     values_match,
@@ -215,3 +216,77 @@ def test_llm_failure_is_a_failed_verdict_not_an_exception():
     verdict = _analyst(FakeLlm([], fail=True)).analyze(_ctx())
     assert not verdict.ok
     assert verdict.error.startswith("ConnectionError")
+
+
+# --- JSON quote repair (shapes seen live from nemotron-3-super) ---
+
+BROKEN_REPLY = """{
+  "recommendation": "buy",
+  "confidence": 0.78,
+  "thesis": "Growth is strong.",
+  "drivers": ["momentum"],
+  "risks": [
+    "Continued heavy AI capex could pressure cash flow, as Burry’s alarm notes.
+    "Rising yields."
+  ],
+  "evidence": [
+    {
+      "fact": "price.change_20d_pct",
+      "value": 7.15,
+      "why": Indicates strong momentum, per the "20d" window.
+    },
+    {
+      "fact": "fundamentals.revenue.value",
+      "value": "109,417,000,000",
+      "why": Shows scale."
+    },
+    {
+      "fact": "relative_volume.relative_volume",
+      "value": 0.61,
+      "why": Quiet volume,
+      "note": "extra"
+    }
+  ],
+  "data_concerns": []
+}"""
+
+
+def test_repair_fixes_the_three_live_shapes_without_changing_words():
+    repairs = []
+    obj = extract_json_object(BROKEN_REPLY, repairs)
+    fields = validate_verdict(obj)
+
+    assert fields["risks"] == [
+        "Continued heavy AI capex could pressure cash flow, as Burry’s alarm notes.",
+        "Rising yields.",
+    ]
+    whys = [e["why"] for e in fields["evidence"]]
+    assert whys == ['Indicates strong momentum, per the "20d" window.', "Shows scale.", "Quiet volume"]
+    assert fields["evidence"][2]["note"] == "extra"  # the comma separator was kept
+    assert len(repairs) == 4
+    assert repairs[0] == "line 7: closed an unterminated string"
+    assert 'quoted the unquoted value of "why"' in repairs[1]
+
+
+def test_valid_json_is_never_touched():
+    repairs = []
+    extract_json_object(_verdict_json(), repairs)
+    assert repairs == []
+    assert repair_json_quotes('{\n  "a": 1,\n  "b": "x"\n}')[1] == []
+
+
+def test_unrepairable_json_still_fails():
+    with pytest.raises(ValueError, match="invalid JSON"):
+        extract_json_object('{\n  "a": [1, 2,,\n}')
+
+
+def test_repaired_reply_is_accepted_and_logged(tmp_path):
+    trace = TraceLogger(tmp_path / "t.jsonl")
+    llm = FakeLlm([BROKEN_REPLY])
+    verdict = _analyst(llm, trace).analyze(_ctx())
+
+    assert verdict.ok and verdict.recommendation == "buy"
+    assert len(llm.calls) == 1  # no correction turn needed
+    assert len(verdict.json_repairs) == 4
+    events = [json.loads(l)["event"] for l in trace.path.read_text(encoding="utf-8").splitlines()]
+    assert events == ["llm_request", "llm_response", "verdict_repaired", "verdict"]
