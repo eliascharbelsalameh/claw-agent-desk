@@ -194,6 +194,7 @@ def test_trim_news_newest_first_and_truncates():
     trimmed = trim_news(items + FakeFinnhub().get_company_news("A", None, None))
     assert trimmed[0]["headline"] == "Garmin rallies"
     assert trimmed[1]["headline"] == "new"
+    assert [t["index"] for t in trimmed] == list(range(len(trimmed)))
     assert trimmed[1]["age_hours"] == 2.0
     long = next(t for t in trimmed if t["headline"] == "h")
     assert long["summary"].endswith("...") and len(long["summary"]) == 303
@@ -265,7 +266,7 @@ def test_empty_briefing_from_length_cutoff_is_a_gap():
     assert ctx.data_gaps[-1].startswith("briefing: empty content (finish_reason=length)")
 
 
-def test_to_prompt_contains_briefing_facts_and_volume_note():
+def test_to_prompt_contains_briefing_facts_and_limitations():
     ctx = _agent(llm=FakeLlm()).run(["AAPL"])["AAPL"]
     prompt = ctx.to_prompt()
     assert "MACRO: rates at 3.50%." in prompt
@@ -394,3 +395,44 @@ def test_stale_fundamentals_become_a_gap():
         "EDGAR fundamentals net_income: latest value is for the period ending 2022-01-30 (stale)"
         in ctx.data_gaps
     )
+
+
+def test_extract_fundamentals_adds_same_period_year_ago():
+    facts = {"facts": {"us-gaap": {
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+            # latest quarter + its YTD twin (same end)
+            {"start": "2026-03-29", "end": "2026-06-27", "val": 110, "form": "10-Q", "filed": "2026-07-31"},
+            {"start": "2025-09-28", "end": "2026-06-27", "val": 330, "form": "10-Q", "filed": "2026-07-31"},
+            # year-ago YTD must not be matched against the quarter
+            {"start": "2024-09-29", "end": "2025-06-28", "val": 300, "form": "10-Q", "filed": "2025-08-01"},
+        ]}},
+        # year-ago quarter sits under an older tag
+        "Revenues": {"units": {"USD": [
+            {"start": "2025-03-30", "end": "2025-06-28", "val": 100, "form": "10-Q", "filed": "2025-08-01"},
+        ]}},
+        "Assets": {"units": {"USD": [
+            {"end": "2026-06-27", "val": 500, "form": "10-Q", "filed": "2026-07-31"},
+            {"end": "2025-06-28", "val": 400, "form": "10-Q", "filed": "2025-08-01"},
+        ]}},
+        "NetIncomeLoss": {"units": {"USD": [
+            {"start": "2026-03-29", "end": "2026-06-27", "val": -50, "form": "10-Q", "filed": "2026-07-31"},
+            {"start": "2025-03-30", "end": "2025-06-28", "val": -100, "form": "10-Q", "filed": "2025-08-01"},
+        ]}},
+    }}}
+    out = extract_fundamentals(facts)
+    assert out["revenue"]["year_ago_value"] == 100
+    assert out["revenue"]["year_ago_period_end"] == "2025-06-28"
+    assert out["revenue"]["yoy_pct_change"] == 10.0
+    assert out["total_assets"]["yoy_pct_change"] == 25.0
+    # a smaller loss is an improvement, so the change reads positive
+    assert out["net_income"]["yoy_pct_change"] == 50.0
+    assert "year_ago_value" not in out.get("cash", {})
+
+
+def test_limitations_are_identical_for_every_stock_and_separate_from_gaps():
+    ok = _agent().run(["AAPL"])["AAPL"]
+    broken = _agent(alpaca=FakeAlpaca(fail=True)).run(["ZZZZ"])["ZZZZ"]
+    assert ok.facts()["limitations"] == broken.facts()["limitations"]
+    assert any("valuation" in item for item in ok.facts()["limitations"])
+    assert any("IEX" in item for item in ok.facts()["limitations"])
+    assert ok.data_gaps == []  # limitations never leak into this run's gaps

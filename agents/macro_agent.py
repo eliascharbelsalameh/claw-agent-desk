@@ -97,6 +97,20 @@ IEX_VOLUME_NOTE = (
     "baseline is meaningful."
 )
 
+# What this desk never provides, identical for every stock and every run -
+# a disclosure, not a judgment. Distinct from data_gaps, which lists what
+# failed to load *this* run. Without it, gpt-oss-20b equated "data
+# concerns" with the (empty) data_gaps and reported none, while treating
+# valuation it had never been given as "implied" (live, Sept 2026).
+DESK_LIMITATIONS = (
+    "No valuation data: no share count, market capitalization, P/E or other multiples.",
+    "No forward-looking data: no company guidance, analyst estimates or earnings calendar.",
+    "Fundamentals cover only the latest reported period and the same period a year earlier.",
+    "News headlines and summaries are unverified third-party reporting, keyword-matched to "
+    "the company; they are not confirmed facts.",
+    IEX_VOLUME_NOTE,
+)
+
 BRIEFING_SECTIONS = ("MACRO", "COMPANY FILINGS & FUNDAMENTALS", "PRICE & VOLUME", "NEWS", "DATA GAPS")
 
 # A fresh call gets one more chance when a briefing fails validation; after
@@ -146,7 +160,7 @@ class StockContext:
         data = asdict(self)
         for key in ("bars_4h", "briefing", "briefing_model"):
             data.pop(key)
-        data["volume_note"] = IEX_VOLUME_NOTE
+        data["limitations"] = list(DESK_LIMITATIONS)
         return data
 
     def to_prompt(self) -> str:
@@ -299,7 +313,37 @@ def extract_fundamentals(company_facts: dict[str, Any]) -> dict[str, Any]:
             "form": best["form"],
             "filed": best.get("filed"),
         }
+        prior = _year_ago_entry(best, [e for _, _, e in entries])
+        if prior is not None:
+            out[name]["year_ago_value"] = prior["val"]
+            out[name]["year_ago_period_end"] = prior["end"]
+            if prior["val"]:
+                out[name]["yoy_pct_change"] = round(
+                    (best["val"] / prior["val"] - 1) * 100 * (1 if prior["val"] > 0 else -1), 2
+                )
     return out
+
+
+def _year_ago_entry(best: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The same kind of period one year earlier: a quarter for a quarter,
+    a fiscal year for a fiscal year, a balance-sheet date for a balance-
+    sheet date. Without this, analysts asserted "earnings growth" from a
+    single quarter (live, Sept 2026). Searched across all candidate tags,
+    since the year-ago value may sit under a tag the company has since
+    dropped. Fiscal calendars drift (52/53-week years), hence the windows.
+    """
+    end = date.fromisoformat(best["end"])
+    duration = _duration_days(best)
+    matches = [
+        e
+        for e in entries
+        if ("start" in e) == ("start" in best)
+        and abs(_duration_days(e) - duration) <= 10
+        and 350 <= (end - date.fromisoformat(e["end"])).days <= 380
+    ]
+    if not matches:
+        return None
+    return min(matches, key=lambda e: _neg_date(e.get("filed")))
 
 
 def _neg_date(iso: str | None) -> int:
@@ -375,12 +419,16 @@ def filter_news(
 def trim_news(items: list[dict[str, Any]], limit: int = MAX_NEWS_ITEMS) -> list[dict[str, Any]]:
     newest_first = sorted(items, key=lambda n: n.get("datetime", 0), reverse=True)
     trimmed = []
-    for item in newest_first[:limit]:
+    for i, item in enumerate(newest_first[:limit]):
         summary = (item.get("summary") or "").strip()
         if len(summary) > NEWS_SUMMARY_CHARS:
             summary = summary[:NEWS_SUMMARY_CHARS].rstrip() + "..."
         trimmed.append(
             {
+                # Explicit position, equal to i in news[i]: analysts citing
+                # news paths miscounted by 1-3 positions when they had to count
+                # (live, Sept 2026).
+                "index": i,
                 "headline": item.get("headline"),
                 "source": item.get("source"),
                 "published_at": item.get("published_at"),

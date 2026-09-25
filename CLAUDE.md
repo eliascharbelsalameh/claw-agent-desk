@@ -15,12 +15,13 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # Windows
 # .venv/bin/python -m pip install -r requirements.txt     # if ever run on Linux (e.g. Oracle A1)
 
-.venv/Scripts/python -m pytest              # full suite (60 tests)
+.venv/Scripts/python -m pytest              # full suite (80 tests)
 .venv/Scripts/python -m pytest -q tests/test_alpaca_client.py   # single file
 .venv/Scripts/python -m pytest -k relative_volume                # by name
 
 .venv/Scripts/python -m agents AAPL MSFT NVDA            # live macro/context agent run
 .venv/Scripts/python -m agents AAPL --no-llm             # data only, no Build credits
+.venv/Scripts/python -m agents AAPL --analysts analyst_1 analyst_2   # context + both analysts
 ```
 
 A live run needs the credentials in the *process* environment — see Credentials below for why a shell may not have them.
@@ -67,7 +68,15 @@ Per-source clients, each a thin subclass of `BaseClient`:
   - The briefing is validated (`briefing_problems`: degenerate repetition, missing sections), retried once with a fresh call, then dropped to a facts-only packet with a gap recorded. Rejections are logged as `briefing_rejected`.
   - Finnhub's company-news feed is keyword-matched and mostly noise (live: 115–202 of ~130–220 weekly items for AAPL/MSFT/NVDA didn't mention the company), so `filter_news` keeps only items mentioning the ticker or the EDGAR-registered short name. Done deterministically because the no-thinking model miscounted when asked to filter.
   - Fundamentals take the most recent period across all candidate XBRL tags (companies switch revenue tags in both directions — NVDA's current revenue is under `Revenues`, AAPL/MSFT's under the ASC 606 tag), and anything older than `FUNDAMENTALS_STALE_DAYS` is flagged as a gap. A 10-K period-end yields the fiscal-year figure (no separate Q4 is tagged), so `period_start`/`period_end` always travel with each value.
+  - Each fundamental also carries the same-period year-ago value and `yoy_pct_change` (quarter vs quarter, fiscal year vs fiscal year, searched across all candidate tags). Without it, analysts asserted "earnings growth" from a single quarter.
+  - `facts()` always includes `limitations` (`DESK_LIMITATIONS`): what the desk never provides — no valuation data, no forward guidance, only latest-vs-year-ago fundamentals, unverified news, IEX-only volume. Identical for every stock and run (a disclosure, not a judgment), and deliberately separate from `data_gaps`, which is only what failed to load this run.
   - Rates and spreads get an absolute year-over-year change; only CPI gets a percentage change (`PERCENT_CHANGE_SERIES`).
+- `analyst_agent.AnalystAgent` — step 2. One instance per role (`analyst_1`, `analyst_2`); `analyze(ctx)` sends `StockContext.to_prompt()` to that role's model and returns an `AnalystVerdict`: `recommendation` (buy/hold/avoid), `confidence`, `thesis`, `drivers`, `risks`, `evidence`, `data_concerns`. Design points:
+  - Structured JSON so the upcoming cross-check compares `recommendation` fields, not prose. Invalid replies get one correction turn (the model sees its reply and the validation error); after that the verdict has `error` set. **A failed verdict must be treated as "no pick", never as agreement.**
+  - Every evidence item cites a path into the facts (`price.change_20d_pct`, `news[2].headline`), and `check_evidence` resolves it deterministically: `verified`, `wrong_index` (real value at another list position — seen live), `mismatch` (with the `actual` value), or `unknown_path`. This catches quoted-number hallucinations; it cannot catch uncited prose claims, which is why the context has to carry the numbers (year-ago values) that make claims checkable.
+  - **Decided:** long-only, real shares — no shorting, derivatives, leverage or negotiated deals; "avoid" means not holding, never shorting. **Decided:** `HORIZON` is the next 2–5 trading days — a forward projection judged only from data available now, chosen so the ~2-day paper run can test the calls. The prompt states only the window, not what to weigh at that range.
+  - Known issue: `gpt-oss-20b` (`analyst_1`) writes `data_concerns: []` every time — its reasoning says "Data concerns: none" because it equates the field with the context's (empty) `data_gaps`, and it reasons briefly (~1–2k chars vs ~4–6k for `nemotron-3-super`). On NVDA it noted valuation was "not given but implied" and still used it as a risk.
+  - Observed live: `gpt-oss-20b` leaves `data_concerns` empty despite the prompt; `nemotron-3-super` fills it thoroughly. On the first 3-stock run the analysts agreed on AAPL (both BUY) and split on MSFT (BUY vs HOLD).
 
 `config.Settings` / `get_settings()` load everything from environment variables (OS env vars, falling back to `.env`) and provide a `.require(field)` that raises `ConfigError` with a clear message instead of the client failing deep inside a request. Every client accepts an optional `Settings`, `requests.Session`, and `DiskCache` in its constructor for testability — tests always inject a fake session and skip real network calls.
 
@@ -83,8 +92,10 @@ Per-source clients, each a thin subclass of `BaseClient`:
 
 **Known limitation:** `AlpacaClient.get_relative_volume` treats the most recent daily bar as "today", so a run during market hours compares a partial day against full-day averages and understates relative volume. Runs so far were pre-market, where it's correct.
 
-**Not built yet:** analyst agents, critic loop, bias/technical agents, end-to-end pipeline orchestration, Oracle A1 deployment.
+**Analyst agent is done and live-verified** (Sept 25, 2026): both analyst roles return valid, evidence-checked verdicts on real context. Per-call time is ~20–50s when Build is healthy, but under load Build drops connections before sending headers and a single call took 335s through four retries — budget minutes, not seconds, per cycle.
 
-**Next step** per the spec's schedule (section 8): the first analyst agent, consuming `StockContext.to_prompt()` and logging through `TraceLogger`. It will be a reasoning model (`openai/gpt-oss-20b`), so expect minutes per call rather than seconds.
+**Not built yet:** the analyst cross-check/abort logic, critic loop, bias/technical agents, end-to-end pipeline orchestration, Oracle A1 deployment.
+
+**Next step** per the spec's schedule (section 8): the cross-check between `analyst_1` and `analyst_2` (spec section 3, step 2: contradict → abort, align → continue), then the critic loop. **Decided (Sept 25, 2026): strict matching** — the two analysts' `recommendation` values must be identical to continue; any difference (including buy vs hold) aborts, and a failed verdict always aborts. **Also decided: a confidence floor** — a matched `buy` proceeds only if both analysts report confidence ≥ 0.66 (revisit after the live run: observed self-reported confidences only spanned 0.62–0.78). **Also decided:** a buy-vs-hold split goes to the critic loop for re-votes instead of aborting immediately, and aborts if still unmatched afterwards; buy-vs-avoid and failed verdicts abort at once.
 
 Live-run costs are still unmeasured: Build trial accounts carry a credit balance (~1,000, up to ~5,000) that drains per call independently of the 40 RPM ceiling. Spec section 9 has the remaining open questions (paper-execute vs. log-only, final stock list, demo output shape).
