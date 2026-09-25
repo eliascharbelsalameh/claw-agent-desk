@@ -18,6 +18,13 @@ logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
+# Dropped connections are retried like 5xxs: NVIDIA Build in particular
+# closes connections without a response under load (seen live, Sept 2026).
+# Read timeouts are deliberately NOT retried (a ConnectTimeout is, since it
+# subclasses ConnectionError and nothing was sent) - LLM calls carry 120s timeouts,
+# and silently re-waiting that five times would stall a cycle for 10 min.
+RETRYABLE_EXCEPTIONS = (requests.ConnectionError,)
+
 
 class DataLayerError(Exception):
     """Base error for the data layer."""
@@ -38,13 +45,26 @@ def request_with_retry(
     timeout: float = 15.0,
     **kwargs: Any,
 ) -> requests.Response:
-    """Issue an HTTP request, retrying on 429/5xx with exponential backoff.
+    """Issue an HTTP request, retrying on 429/5xx and dropped connections
+    with exponential backoff.
 
     Honors a numeric Retry-After header on 429 responses instead of guessing.
     """
     attempt = 0
     while True:
-        response = session.request(method, url, timeout=timeout, **kwargs)
+        try:
+            response = session.request(method, url, timeout=timeout, **kwargs)
+        except RETRYABLE_EXCEPTIONS as exc:
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            delay = min(backoff_base * (2 ** (attempt - 1)), backoff_max) + random.uniform(0, 0.25)
+            logger.warning(
+                "%s %s -> %s, retrying in %.1fs (attempt %d/%d)",
+                method, url, type(exc).__name__, delay, attempt, max_retries,
+            )
+            time.sleep(delay)
+            continue
         if response.status_code not in RETRYABLE_STATUS_CODES:
             return response
 

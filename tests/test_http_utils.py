@@ -23,7 +23,10 @@ class _FakeSession:
 
     def request(self, method, url, **kwargs):
         self.calls += 1
-        return self._responses.pop(0)
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
 
 def test_succeeds_first_try():
@@ -62,4 +65,28 @@ def test_non_retryable_status_returned_immediately():
     session = _FakeSession([_FakeResponse(404)])
     resp = request_with_retry(session, "GET", "http://x", max_retries=3, backoff_base=0.01)
     assert resp.status_code == 404
+    assert session.calls == 1
+
+
+def test_retries_dropped_connection(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    session = _FakeSession([requests.ConnectionError("remote closed"), _FakeResponse(200)])
+    resp = request_with_retry(session, "GET", "http://x", max_retries=3, backoff_base=0.01)
+    assert resp.status_code == 200
+    assert session.calls == 2
+
+
+def test_dropped_connection_reraises_after_budget(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    session = _FakeSession([requests.ConnectionError("remote closed")] * 3)
+    with pytest.raises(requests.ConnectionError):
+        request_with_retry(session, "GET", "http://x", max_retries=2, backoff_base=0.01)
+    assert session.calls == 3
+
+
+def test_timeout_is_not_retried(monkeypatch):
+    monkeypatch.setattr(time, "sleep", lambda s: None)
+    session = _FakeSession([requests.ReadTimeout("slow"), _FakeResponse(200)])
+    with pytest.raises(requests.ReadTimeout):
+        request_with_retry(session, "GET", "http://x", max_retries=3, backoff_base=0.01)
     assert session.calls == 1

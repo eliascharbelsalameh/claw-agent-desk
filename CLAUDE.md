@@ -15,10 +15,15 @@ python -m venv .venv
 .venv/Scripts/python -m pip install -r requirements.txt   # Windows
 # .venv/bin/python -m pip install -r requirements.txt     # if ever run on Linux (e.g. Oracle A1)
 
-.venv/Scripts/python -m pytest              # full suite (28 tests)
+.venv/Scripts/python -m pytest              # full suite (60 tests)
 .venv/Scripts/python -m pytest -q tests/test_alpaca_client.py   # single file
 .venv/Scripts/python -m pytest -k relative_volume                # by name
+
+.venv/Scripts/python -m agents AAPL MSFT NVDA            # live macro/context agent run
+.venv/Scripts/python -m agents AAPL --no-llm             # data only, no Build credits
 ```
+
+A live run needs the credentials in the *process* environment — see Credentials below for why a shell may not have them.
 
 Tests never hit real APIs — every client is exercised with a fake `session.request` object, so the suite runs without any credentials present.
 
@@ -38,7 +43,7 @@ Note that a shell started *before* a `setx` won't see the new value — an exist
 
 `data_layer/` is a set of thin, independent clients for each data source in the spec (section 5), sharing plumbing so retry/caching behavior is identical everywhere rather than reimplemented per client:
 
-- `http_utils.request_with_retry` — every outbound HTTP call goes through this. Retries on 429/500/502/503/504 with exponential backoff + jitter, honoring a numeric `Retry-After` header on 429s instead of guessing. This is the "must have: retry with backoff on 429" requirement from the spec, applied to all data calls, not just LLM calls.
+- `http_utils.request_with_retry` — every outbound HTTP call goes through this. Retries on 429/500/502/503/504 and on dropped connections (`requests.ConnectionError`; Build closes connections under load) with exponential backoff + jitter, honoring a numeric `Retry-After` header on 429s instead of guessing. Read timeouts are deliberately not retried. This is the "must have: retry with backoff on 429" requirement from the spec, applied to all data calls, not just LLM calls.
 - `cache.DiskCache` — dependency-free JSON-file cache with a per-entry TTL, keyed by URL+params. Callers pick the TTL per call site (e.g. EDGAR's ticker→CIK map caches for a week, Finnhub news for 15 minutes) — there's no single global policy because "cache everything that changes slowly" (spec section 5) means different things per source.
 - `base_client.BaseClient._get_json` — wires the above two together (check cache → retry-aware GET → cache the result) so each client only implements URL-building and response shaping, not request mechanics.
 
@@ -50,22 +55,36 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - `finnhub_client.FinnhubClient` — company news only (the free plan doesn't reliably serve candles, so don't add a prices method here — use Alpaca). Tags every item with `age_hours` on the way out since the staleness check downstream needs that.
 - `llm_client.LlmClient` — NVIDIA Build chat-completions client (`chat_completion`, `complete_text`). Same retry/backoff as every other client via `request_with_retry`, plus client-side per-model rate pacing (`DEFAULT_RPM_LIMIT = 40`, the only figure Build confirms, applied to every model as a conservative default). `AGENT_MODELS` maps each pipeline role (macro, analyst_1, analyst_2, critic, bias_1, bias_2, technical) to a model id from a different lab, per the spec's "independent failure modes" design choice (spec section 4). Two gotchas worth knowing before touching this file:
   - **Verifying a model id needs a real call.** `GET /v1/models` lists plenty of ids that then 404 with "Not found for account", and two of the original picks were 410 Gone (end of life). Neither build.nvidia.com's catalog page nor the per-model `docs.api.nvidia.com` reference pages were reliable. All seven current ids were confirmed with an actual `chat_completion` (Sept 2026) — see spec section 4 for the table and what each replaced.
-  - **Most of these are reasoning models** (hidden chain-of-thought before visible content), so a small `max_tokens` yields `finish_reason: "length"` with empty `content`, and they're slow — `DEFAULT_TIMEOUT` is 120s here versus 15s elsewhere in the data layer, because `openai/gpt-oss-20b` alone needed ~90s.
+  - **Most of these are reasoning models** (hidden chain-of-thought before visible content), so a small `max_tokens` yields `finish_reason: "length"` with empty `content`, and they're slow — `DEFAULT_TIMEOUT` is 120s here versus 15s elsewhere in the data layer, because `openai/gpt-oss-20b` alone needed ~90s. Nemotron models take `chat_template_kwargs={"enable_thinking": False}` to skip reasoning entirely (one-line prompt: 59s → 2s); use it for roles that only summarize.
+  - **Calls stream by default, and must.** Build's gateway kills any connection that sends no bytes for 60s, so a non-streaming call to a reasoning model dies at 60s regardless of `DEFAULT_TIMEOUT` (reproduced repeatedly, Sept 2026). `chat_completion` streams and reassembles the chunks into the normal non-streaming response shape (reasoning goes to `message.reasoning_content`), and retries dropped/truncated streams `STREAM_RETRIES` times. Pass `stream=False` only for calls known to finish fast.
+  - **Build output quality is not guaranteed.** Live, 2 of 3 briefings from the macro model degenerated mid-text into "The The The…" / ",,,,,,," — both on calls whose first stream had dropped. Any agent that forwards LLM text should validate its shape before passing it on (see `agents.macro_agent.briefing_problems`).
+
+`agents/` holds the pipeline agents (spec section 3), built on the data layer:
+
+- `trace.TraceLogger` — append-only JSONL log of every agent's input and output with a UTC timestamp (spec section 3: the demo needs the back-and-forth, not just the final call). One line per event; every agent should log through this.
+- `macro_agent.MacroContextAgent` — step 1 of the pipeline. `run(symbols)` gathers FRED macro (once, shared), Alpaca daily/4H bars + relative volume, EDGAR filings + fundamentals, and Finnhub news per symbol into a `StockContext`, then asks `AGENT_MODELS["macro"]` (thinking off) for a neutral factual briefing that is explicitly forbidden from opinions or recommendations. `StockContext.to_prompt()` is what downstream analysts consume: the briefing plus the full source facts, labeled as authoritative over the briefing. Design points:
+  - Every source failure becomes a line in `StockContext.data_gaps` instead of an exception, so a 2-day run degrades rather than crashes; analysts are told what's missing.
+  - The briefing is validated (`briefing_problems`: degenerate repetition, missing sections), retried once with a fresh call, then dropped to a facts-only packet with a gap recorded. Rejections are logged as `briefing_rejected`.
+  - Finnhub's company-news feed is keyword-matched and mostly noise (live: 115–202 of ~130–220 weekly items for AAPL/MSFT/NVDA didn't mention the company), so `filter_news` keeps only items mentioning the ticker or the EDGAR-registered short name. Done deterministically because the no-thinking model miscounted when asked to filter.
+  - Fundamentals take the most recent period across all candidate XBRL tags (companies switch revenue tags in both directions — NVDA's current revenue is under `Revenues`, AAPL/MSFT's under the ASC 606 tag), and anything older than `FUNDAMENTALS_STALE_DAYS` is flagged as a gap. A 10-K period-end yields the fiscal-year figure (no separate Q4 is tagged), so `period_start`/`period_end` always travel with each value.
+  - Rates and spreads get an absolute year-over-year change; only CPI gets a percentage change (`PERCENT_CHANGE_SERIES`).
 
 `config.Settings` / `get_settings()` load everything from environment variables (OS env vars, falling back to `.env`) and provide a `.require(field)` that raises `ConfigError` with a clear message instead of the client failing deep inside a request. Every client accepts an optional `Settings`, `requests.Session`, and `DiskCache` in its constructor for testability — tests always inject a fake session and skip real network calls.
 
 ## Status
 
-**Data layer is done and live-verified** (as of Sept 24, 2026, commit `07b744b`, pushed to `origin/master` at https://github.com/eliascharbelsalameh/claw-agent-desk). All 28 tests pass, and every client has been smoke-tested against its real API with real credentials:
+**Data layer is done and live-verified** (Sept 24, 2026, commit `07b744b`, pushed to `origin/master` at https://github.com/eliascharbelsalameh/claw-agent-desk). Every client has been smoke-tested against its real API with real credentials:
 
-- Alpaca — paper account `ACTIVE`, real AAPL daily bars. Note `get_bars` returns 0 rows without an explicit `start`/`end`; always pass a range.
-- FRED — real `FEDFUNDS` observations.
-- Finnhub — real company news, `age_hours` populated.
-- SEC EDGAR — AAPL → CIK `0000320193`.
+- Alpaca — paper account `ACTIVE`, real daily bars. Note `get_bars` returns 0 rows without an explicit `start`/`end`; always pass a range.
+- FRED, Finnhub, SEC EDGAR — real data.
 - NVIDIA Build — all seven `AGENT_MODELS` ids answered a real call.
 
-**Not built yet:** no agent logic at all sits on top of `llm_client.py` — no macro/context agent, no analyst agents, no critic loop, no bias/technical agents, no end-to-end pipeline, no logging layer, no Oracle A1 deployment.
+**Macro/context agent is done and live-verified** (Sept 25, 2026): a full AAPL/MSFT/NVDA run completed in ~166s with zero data gaps and all three briefings passing validation on the first attempt (~35–90s per briefing, ~6.4k prompt + ~1.5k completion tokens each). An earlier run during Build instability took 454s with two stream drops, both recovered by retry.
 
-**Next step** per the spec's schedule (section 8): the macro/context agent, wired to this data layer plus `LlmClient` — it only gathers and passes context (macro, filings, news, price/volume) to the analysts and does no analysis itself (spec section 3, step 1). Then the first analyst agent.
+**Known limitation:** `AlpacaClient.get_relative_volume` treats the most recent daily bar as "today", so a run during market hours compares a partial day against full-day averages and understates relative volume. Runs so far were pre-market, where it's correct.
 
-Live-run costs are still unmeasured: Build trial accounts carry a credit balance (~1,000, up to ~5,000) that drains per call independently of the 40 RPM ceiling, and a full multi-agent cycle will take minutes given the reasoning-model latencies above. Spec section 9 has the remaining open questions (paper-execute vs. log-only, final stock list, demo output shape).
+**Not built yet:** analyst agents, critic loop, bias/technical agents, end-to-end pipeline orchestration, Oracle A1 deployment.
+
+**Next step** per the spec's schedule (section 8): the first analyst agent, consuming `StockContext.to_prompt()` and logging through `TraceLogger`. It will be a reasoning model (`openai/gpt-oss-20b`), so expect minutes per call rather than seconds.
+
+Live-run costs are still unmeasured: Build trial accounts carry a credit balance (~1,000, up to ~5,000) that drains per call independently of the 40 RPM ceiling. Spec section 9 has the remaining open questions (paper-execute vs. log-only, final stock list, demo output shape).

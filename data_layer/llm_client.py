@@ -25,9 +25,23 @@ Z.ai's GLM, Moonshot's Kimi) - two consequences for callers: give them a
 generous max_tokens or they'll hit finish_reason "length" with empty
 content, and DEFAULT_TIMEOUT below is much higher than other data-layer
 calls because gpt-oss-20b alone took up to ~90s to respond in testing.
+Nemotron models accept chat_template_kwargs={"enable_thinking": False} to
+skip the reasoning entirely - worth it for roles that only summarize.
+
+Calls stream by default. Build's gateway closes any connection that sends
+no bytes for 60s ("Remote end closed connection without response",
+reproduced live Sept 2026), so a non-streaming call to a reasoning model
+dies before DEFAULT_TIMEOUT ever applies; streaming keeps bytes flowing
+and has run past 5 minutes. The chunks are reassembled into the same
+shape as a non-streaming response, so callers don't care which was used.
+Build also drops streams mid-response under load; those are retried
+STREAM_RETRIES times on top of request_with_retry's own retries.
 """
 from __future__ import annotations
 
+import json
+import logging
+import random
 import time
 from collections import defaultdict, deque
 from typing import Any
@@ -37,8 +51,11 @@ import requests
 from .config import Settings, get_settings
 from .http_utils import request_with_retry
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_RPM_LIMIT = 40
 DEFAULT_TIMEOUT = 120.0
+STREAM_RETRIES = 2
 
 AGENT_MODELS = {
     "macro": "nvidia/nemotron-3.5-lightning-30b-a3b",
@@ -86,9 +103,9 @@ class LlmClient:
         temperature: float = 0.2,
         max_tokens: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        stream: bool = True,
         **kwargs: Any,
     ) -> dict[str, Any]:
-        self._wait_for_rate_limit(model)
         url = f"{self._settings.nvidia_base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": model,
@@ -97,21 +114,42 @@ class LlmClient:
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
+        if stream:
+            payload["stream"] = True
+            payload["stream_options"] = {"include_usage": True}
         payload.update(kwargs)
+        headers = {
+            "Authorization": f"Bearer {self._settings.require('nvidia_api_key')}",
+            "Content-Type": "application/json",
+        }
 
-        response = request_with_retry(
-            self._session,
-            "POST",
-            url,
-            headers={
-                "Authorization": f"Bearer {self._settings.require('nvidia_api_key')}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        return response.json()
+        attempt = 0
+        while True:
+            self._wait_for_rate_limit(model)
+            response = request_with_retry(
+                self._session,
+                "POST",
+                url,
+                headers=headers,
+                json=payload,
+                timeout=timeout,
+                stream=stream,
+            )
+            response.raise_for_status()
+            if not stream:
+                return response.json()
+            try:
+                return _read_stream(response)
+            except (requests.ConnectionError, requests.exceptions.ChunkedEncodingError) as exc:
+                attempt += 1
+                if attempt > STREAM_RETRIES:
+                    raise
+                delay = 2.0 * attempt + random.uniform(0, 0.25)
+                logger.warning(
+                    "stream from %s dropped (%s), retrying in %.1fs (attempt %d/%d)",
+                    model, type(exc).__name__, delay, attempt, STREAM_RETRIES,
+                )
+                time.sleep(delay)
 
     def complete_text(
         self,
@@ -121,3 +159,47 @@ class LlmClient:
     ) -> str:
         data = self.chat_completion(model, messages, **kwargs)
         return data["choices"][0]["message"]["content"]
+
+
+def _read_stream(response: requests.Response) -> dict[str, Any]:
+    """Reassemble an OpenAI-style SSE stream into a non-streaming response.
+
+    Reasoning arrives in delta.reasoning_content (or delta.reasoning,
+    depending on the model) and is kept separate from the visible content.
+    """
+    content: list[str] = []
+    reasoning: list[str] = []
+    finish_reason: str | None = None
+    usage: dict[str, Any] | None = None
+    response_id: str | None = None
+    model: str | None = None
+    for raw in response.iter_lines():
+        line = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+        if not line.startswith("data:"):
+            continue
+        data = line[len("data:"):].strip()
+        if data == "[DONE]":
+            break
+        chunk = json.loads(data)
+        response_id = response_id or chunk.get("id")
+        model = model or chunk.get("model")
+        if chunk.get("usage"):
+            usage = chunk["usage"]
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            if delta.get("content"):
+                content.append(delta["content"])
+            thought = delta.get("reasoning_content") or delta.get("reasoning")
+            if thought:
+                reasoning.append(thought)
+            finish_reason = choice.get("finish_reason") or finish_reason
+
+    message: dict[str, Any] = {"role": "assistant", "content": "".join(content)}
+    if reasoning:
+        message["reasoning_content"] = "".join(reasoning)
+    return {
+        "id": response_id,
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
+        "usage": usage,
+    }
