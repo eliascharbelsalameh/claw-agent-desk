@@ -56,6 +56,21 @@ def aggregate_bars(bars: list[dict[str, Any]], hours: int = 4) -> list[dict[str,
     return [buckets[b] for b in order]
 
 
+def session_in_progress(daily_bar: dict[str, Any], clock: dict[str, Any]) -> bool:
+    """Whether `daily_bar` is today's session and that session hasn't closed.
+
+    Daily bars are stamped at midnight US/Eastern (e.g. 2026-09-25T04:00:00Z),
+    so their date prefix is the session's date; the clock's timestamp carries
+    the Eastern offset, so its date prefix is today's exchange date. Today's
+    session is still running (or not yet started) exactly when the next close
+    is today; after the close, next_close moves to the next trading day.
+    """
+    today = str(clock.get("timestamp", ""))[:10]
+    if not today:
+        return False
+    return daily_bar["t"][:10] == today and str(clock.get("next_close", ""))[:10] == today
+
+
 class AlpacaClient(BaseClient):
     def __init__(
         self,
@@ -126,18 +141,38 @@ class AlpacaClient(BaseClient):
         hourly = self.get_bars(symbol, timeframe="1Hour", start=start, end=end)
         return aggregate_bars(hourly, hours=4)
 
-    def get_relative_volume(self, symbol: str, lookback_days: int = 20) -> dict[str, Any]:
-        """Latest daily IEX volume vs the average of the prior `lookback_days`.
+    def get_relative_volume(
+        self, symbol: str, lookback_days: int = 20, clock: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Latest completed session's daily IEX volume vs the average of the
+        `lookback_days` sessions before it.
 
         Spec section 6: absolute IEX volume understates true market volume,
         so agents should reason about relative volume against a recent
         rolling baseline (weeks, not years) rather than the absolute figure.
+
+        While a session is still running, its daily bar holds only the volume
+        traded so far; comparing that with full-day averages made relative
+        volume look falsely low all morning. So a still-running session is
+        left out of the comparison and reported separately
+        (`in_progress_volume`). `clock` is get_clock()'s result; it is
+        fetched when not given, and if the clock can't be read the latest
+        bar is used as before, with `session_in_progress` None (unknown).
         """
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=lookback_days + 5)
         daily_bars = self.get_bars(
             symbol, timeframe="1Day", start=start, end=end, cache_ttl=3600.0
         )
+        if clock is None:
+            try:
+                clock = self.get_clock()
+            except Exception:  # noqa: BLE001 - relative volume still works, flagged as unknown
+                clock = None
+        in_progress = None
+        if daily_bars and clock is not None and session_in_progress(daily_bars[-1], clock):
+            in_progress = daily_bars[-1]
+            daily_bars = daily_bars[:-1]
         if len(daily_bars) < 2:
             raise ValueError(f"not enough daily bars for {symbol} to compute relative volume")
 
@@ -147,14 +182,26 @@ class AlpacaClient(BaseClient):
             raise ValueError(f"not enough history for {symbol} to compute relative volume")
         baseline = sum(bar["v"] for bar in history) / len(history)
         latest_volume = latest["v"]
-        return {
+        result = {
             "symbol": symbol,
             "date": latest["t"],
             "latest_volume": latest_volume,
             "baseline_avg_volume": baseline,
             "relative_volume": (latest_volume / baseline) if baseline else float("inf"),
             "feed": "iex",
+            "session_in_progress": None if clock is None else in_progress is not None,
         }
+        if in_progress is not None:
+            result["in_progress_date"] = in_progress["t"]
+            result["in_progress_volume"] = in_progress["v"]
+        return result
+
+    def get_clock(self) -> dict[str, Any]:
+        """Alpaca's market clock: timestamp, is_open, next_open, next_close.
+        Timestamps carry the exchange's own (US/Eastern) offset, and the clock
+        accounts for holidays and early closes. Never cached."""
+        url = f"{self._settings.alpaca_trading_base_url}/v2/clock"
+        return self._get_json(url, headers=self._auth_headers())
 
     # --- Paper trading account (simulated execution, spec section 5) ---
 

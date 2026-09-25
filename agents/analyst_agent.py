@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from data_layer.llm_client import AGENT_MODELS
+from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
 from .llm_json import (  # noqa: F401 - parsing helpers re-exported for existing callers
     PARSE_ATTEMPTS,
@@ -147,11 +148,21 @@ class AnalystVerdict:
     # One {point, accept, reason} per challenge the analyst answered; accept
     # is None when the model didn't say (e.g. it replied in free text).
     response_to_critique: list[dict[str, Any]] = field(default_factory=list)
+    # Models tried before `model` answered, and why each failed.
+    fallbacks: list[dict[str, Any]] = field(default_factory=list)
+    # The role's configured primary. `model` differs from it when a backup
+    # answered - including when the primary was skipped without a call
+    # because it failed minutes earlier (so `fallbacks` is empty).
+    primary_model: str | None = None
     error: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None
+
+    @property
+    def used_backup(self) -> bool:
+        return self.primary_model is not None and self.model != self.primary_model
 
     @property
     def changed(self) -> bool:
@@ -404,14 +415,21 @@ class AnalystAgent:
         *,
         trace: TraceLogger | None = None,
         model: str | None = None,
+        models: Sequence[str] | None = None,
+        health: ModelHealth | None = None,
         max_tokens: int = ANALYST_MAX_TOKENS,
         temperature: float = ANALYST_TEMPERATURE,
         extra_params: dict[str, Any] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
+        """`models` is the ordered candidate list (primary, then backups);
+        by default the role's list from AGENT_MODELS/AGENT_MODEL_BACKUPS.
+        Passing `model` pins a single model with no backups."""
         self._llm = llm
         self.role = role
-        self.model = model or AGENT_MODELS[role]
+        self.models = list(models) if models else [model] if model else role_models(role)
+        self.model = self.models[0]
+        self._health = health if health is not None else DEFAULT_MODEL_HEALTH
         self._trace = trace
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -427,20 +445,28 @@ class AnalystAgent:
             symbol=ctx.symbol,
             role=self.role,
             model=self.model,
+            primary_model=self.model,
             generated_at=self._now().isoformat(),
             **fields,
         )
 
     def _complete(
-        self, ctx: StockContext, verdict: AnalystVerdict, messages: list[dict[str, str]]
+        self,
+        ctx: StockContext,
+        verdict: AnalystVerdict,
+        messages: list[dict[str, str]],
+        models: Sequence[str],
+        exclude: Collection[str],
     ) -> dict[str, Any] | None:
-        """Ask the model for the verdict JSON and fill `verdict` in place.
+        """Ask the candidate models, in order, for the verdict JSON and fill
+        `verdict` in place (including the model that actually answered).
         Returns the raw parsed object, or None with `verdict.error` set."""
-        base = {"symbol": ctx.symbol, "model": self.model, "review_round": verdict.review_round}
-        self._log("llm_request", {**base, "messages": messages})
+        base = {"symbol": ctx.symbol, "review_round": verdict.review_round}
+        self._log("llm_request", {**base, "models": list(models), "exclude": sorted(exclude),
+                                  "messages": messages})
         reply = request_json(
             self._llm,
-            self.model,
+            models,
             messages,
             validate=validate_verdict,
             log=self._log,
@@ -450,7 +476,11 @@ class AnalystAgent:
             extra_params=self._extra_params,
             invalid_event="verdict_invalid",
             repaired_event="verdict_repaired",
+            health=self._health,
+            exclude=exclude,
         )
+        verdict.model = reply.model or verdict.model
+        verdict.fallbacks = reply.fallbacks
         if not reply.ok:
             verdict.error = reply.error if reply.call_failed else f"unparseable verdict: {reply.error}"
             return None
@@ -460,13 +490,15 @@ class AnalystAgent:
         verdict.evidence_check = check_evidence(verdict.evidence, ctx.facts())
         return reply.raw
 
-    def analyze(self, ctx: StockContext) -> AnalystVerdict:
+    def analyze(self, ctx: StockContext, *, exclude: Collection[str] = ()) -> AnalystVerdict:
+        """Independent first verdict. `exclude` names models this analyst
+        must not use - the model the other analyst already ran on."""
         verdict = self._new_verdict(ctx)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": ctx.to_prompt()},
         ]
-        if self._complete(ctx, verdict, messages) is not None:
+        if self._complete(ctx, verdict, messages, self.models, set(exclude)) is not None:
             self._log("verdict", verdict.to_dict())
         return verdict
 
@@ -508,7 +540,10 @@ class AnalystAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"{ctx.to_prompt()}\n\n{review}"},
         ]
-        raw = self._complete(ctx, verdict, messages)
+        # The same model that wrote the verdict revises it when it can; the
+        # other analyst's model is never an option.
+        models = list(dict.fromkeys([own.model, *self.models]))
+        raw = self._complete(ctx, verdict, messages, models, {other.model})
         if raw is not None:
             verdict.response_to_critique = parse_critique_responses(raw.get("response_to_critique"))
             self._log("verdict", verdict.to_dict())

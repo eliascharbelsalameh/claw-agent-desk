@@ -17,12 +17,15 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
-from data_layer.llm_client import AGENT_MODELS
+from data_layer.alpaca_client import session_in_progress
+from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
+from .llm_json import BACKUP_CONNECT_RETRIES
 from .trace import TraceLogger
 
 AGENT_NAME = "macro"
@@ -81,6 +84,13 @@ BARS_4H_LOOKBACK_DAYS = 15
 # ever reassigned to another family, re-check what it accepts.
 BRIEFING_MAX_TOKENS = 2048
 BRIEFING_EXTRA_PARAMS = {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def briefing_params(model: str) -> dict[str, Any]:
+    """The thinking-off flag, only for NVIDIA Nemotron models: it's their
+    chat-template switch, and a backup from another family may reject or
+    misread an unknown chat_template_kwargs."""
+    return dict(BRIEFING_EXTRA_PARAMS) if model.startswith("nvidia/nemotron") else {}
 
 # Stripped from EDGAR's registered name so "Apple Inc." matches headlines
 # that say "Apple".
@@ -351,7 +361,13 @@ def _neg_date(iso: str | None) -> int:
     return -date.fromisoformat(iso).toordinal() if iso else 0
 
 
-def summarize_daily_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
+def summarize_daily_bars(
+    bars: list[dict[str, Any]], latest_in_progress: bool = False
+) -> dict[str, Any] | None:
+    """Price summary from ascending daily bars. When the latest bar is a
+    session still running, its "close" is just the latest trade so far;
+    that is kept (it is the current price) but flagged, so no reader takes
+    it for a settled close."""
     if not bars:
         return None
     closes = [b["c"] for b in bars]
@@ -363,7 +379,7 @@ def summarize_daily_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
         return round((closes[-1] / closes[-1 - days] - 1) * 100, 2)
 
     window = bars[-20:]
-    return {
+    summary = {
         "last_close": last["c"],
         "last_bar_date": last["t"],
         "change_1d_pct": pct_change(1),
@@ -372,7 +388,14 @@ def summarize_daily_bars(bars: list[dict[str, Any]]) -> dict[str, Any] | None:
         "high_20d": max(b["h"] for b in window),
         "low_20d": min(b["l"] for b in window),
         "daily_bars_available": len(bars),
+        "latest_bar_in_progress": latest_in_progress,
     }
+    if latest_in_progress:
+        summary["note"] = (
+            "The latest session is still running: last_close is the latest intraday price "
+            "(IEX feed, may lag), and change_1d_pct compares it with the previous session's close."
+        )
+    return summary
 
 
 def company_short_name(name: str) -> str:
@@ -450,16 +473,22 @@ class MacroContextAgent:
         llm: Any | None,
         *,
         trace: TraceLogger | None = None,
-        model: str = AGENT_MODELS[AGENT_NAME],
+        model: str | None = None,
+        models: Sequence[str] | None = None,
+        health: ModelHealth | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
+        """`models` is the ordered candidate list for the briefing (primary,
+        then backups); by default the macro role's list. Passing `model`
+        pins a single model with no backups."""
         self._alpaca = alpaca
         self._fred = fred
         self._edgar = edgar
         self._finnhub = finnhub
         self._llm = llm
         self._trace = trace
-        self._model = model
+        self._models = list(models) if models else [model] if model else role_models(AGENT_NAME)
+        self._health = health if health is not None else DEFAULT_MODEL_HEALTH
         self._now = now
 
     def _log(self, event: str, payload: dict[str, Any]) -> None:
@@ -487,7 +516,13 @@ class MacroContextAgent:
             macro[series_id] = {"label": label, **summary}
         return macro, gaps
 
-    def gather_stock(self, symbol: str, macro: dict[str, Any], macro_gaps: list[str]) -> StockContext:
+    def gather_stock(
+        self,
+        symbol: str,
+        macro: dict[str, Any],
+        macro_gaps: list[str],
+        clock: dict[str, Any] | None = None,
+    ) -> StockContext:
         now = self._now()
         ctx = StockContext(
             symbol=symbol.upper(),
@@ -513,12 +548,13 @@ class MacroContextAgent:
             ),
         )
         if daily is not None:
-            ctx.price = summarize_daily_bars(daily)
+            in_progress = bool(daily) and clock is not None and session_in_progress(daily[-1], clock)
+            ctx.price = summarize_daily_bars(daily, latest_in_progress=in_progress)
             if ctx.price is None:
                 ctx.data_gaps.append("daily bars: none returned")
 
         ctx.relative_volume = attempt(
-            "relative volume", lambda: self._alpaca.get_relative_volume(ctx.symbol)
+            "relative volume", lambda: self._alpaca.get_relative_volume(ctx.symbol, clock=clock)
         )
         ctx.bars_4h = (
             attempt(
@@ -591,49 +627,78 @@ class MacroContextAgent:
                 ),
             },
         ]
-        self._log("llm_request", {"symbol": ctx.symbol, "model": self._model, "messages": messages})
+        candidates = self._health.order(self._models)
+        self._log("llm_request", {"symbol": ctx.symbol, "models": candidates, "messages": messages})
         failure = ""
-        for attempt in range(1, BRIEFING_ATTEMPTS + 1):
-            base = {"symbol": ctx.symbol, "model": self._model, "attempt": attempt}
-            try:
-                response = self._llm.chat_completion(
-                    self._model, messages, max_tokens=BRIEFING_MAX_TOKENS, **BRIEFING_EXTRA_PARAMS
+        tries = 0
+        for i, model in enumerate(candidates):
+            has_backup = i < len(candidates) - 1
+            retry_budget = {"max_retries": BACKUP_CONNECT_RETRIES} if has_backup else {}
+            for attempt in range(1, BRIEFING_ATTEMPTS + 1):
+                tries += 1
+                base = {"symbol": ctx.symbol, "model": model, "attempt": attempt}
+                try:
+                    response = self._llm.chat_completion(
+                        model, messages, max_tokens=BRIEFING_MAX_TOKENS,
+                        **retry_budget, **briefing_params(model),
+                    )
+                    choice = response["choices"][0]
+                    content = _strip_reasoning(choice["message"].get("content") or "")
+                    finish_reason = choice.get("finish_reason")
+                except Exception as exc:  # noqa: BLE001 - analysts still get the raw facts
+                    failure = f"{type(exc).__name__}: {exc}"
+                    self._log("llm_error", {**base, "error": repr(exc)})
+                    self._health.record_failure(model)
+                    break  # the call itself failed: move on to the next model
+
+                self._log(
+                    "llm_response",
+                    {**base, "finish_reason": finish_reason, "content": content,
+                     "usage": response.get("usage")},
                 )
-                choice = response["choices"][0]
-                content = _strip_reasoning(choice["message"].get("content") or "")
-                finish_reason = choice.get("finish_reason")
-            except Exception as exc:  # noqa: BLE001 - analysts still get the raw facts
-                failure = f"{type(exc).__name__}: {exc}"
-                self._log("llm_error", {**base, "error": repr(exc)})
-                continue
+                if not content:
+                    failure = f"empty content (finish_reason={finish_reason})"
+                    continue
+                problems = briefing_problems(content)
+                if problems:
+                    failure = "rejected: " + "; ".join(problems)
+                    self._log("briefing_rejected", {**base, "problems": problems})
+                    continue
+                self._health.record_success(model)
+                ctx.briefing = content
+                ctx.briefing_model = model
+                return
+            if has_backup:
+                self._log("fallback", {"symbol": ctx.symbol, "from_model": model,
+                                       "to_model": candidates[i + 1], "reason": failure})
 
-            self._log(
-                "llm_response",
-                {**base, "finish_reason": finish_reason, "content": content,
-                 "usage": response.get("usage")},
-            )
-            if not content:
-                failure = f"empty content (finish_reason={finish_reason})"
-                continue
-            problems = briefing_problems(content)
-            if problems:
-                failure = "rejected: " + "; ".join(problems)
-                self._log("briefing_rejected", {**base, "problems": problems})
-                continue
-            ctx.briefing = content
-            ctx.briefing_model = self._model
-            return
-
-        ctx.data_gaps.append(f"briefing: {failure} (after {BRIEFING_ATTEMPTS} attempts)")
+        ctx.data_gaps.append(
+            f"briefing: {failure} ({tries} attempt{'s' if tries != 1 else ''} across "
+            f"{len(candidates)} model{'s' if len(candidates) != 1 else ''})"
+        )
 
     # --- entry point ---
 
+    def market_clock(self) -> tuple[dict[str, Any] | None, list[str]]:
+        """Alpaca's market clock, read once per run so every stock is judged
+        against the same moment. Without it, a session still running can't
+        be told apart from a finished one."""
+        try:
+            return self._alpaca.get_clock(), []
+        except Exception as exc:  # noqa: BLE001 - becomes a data gap
+            return None, [
+                f"market clock: {type(exc).__name__}: {exc} - can't tell whether today's "
+                "session is still running, so the latest price and volume may be partial"
+            ]
+
     def run(self, symbols: list[str]) -> dict[str, StockContext]:
-        """Context packet per symbol. Macro is fetched once and shared."""
+        """Context packet per symbol. Macro and the market clock are fetched
+        once and shared."""
         macro, macro_gaps = self.gather_macro()
+        clock, clock_gaps = self.market_clock()
         contexts: dict[str, StockContext] = {}
         for symbol in symbols:
-            ctx = self.gather_stock(symbol, macro, macro_gaps)
+            ctx = self.gather_stock(symbol, macro, macro_gaps + clock_gaps, clock=clock)
             self._log("context_gathered", {"symbol": ctx.symbol, "facts": ctx.facts()})
             self.write_briefing(ctx)
             contexts[ctx.symbol] = ctx

@@ -42,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import random
+import threading
 import time
 from collections import defaultdict, deque
 from typing import Any
@@ -63,23 +64,105 @@ STREAM_RETRIES = 2
 # in a side-by-side screen (glm-5.3/-flash and kimi-k3 mostly dropped;
 # kimi-k2.6, mistral-large-2, palmyra-fin 404 on this account), and at
 # temperature 0 it returned identical verdicts across repeats.
-# bias_1 still points at the same model and must be reassigned before the
-# bias agents are built, or one model would be checking its own analysis.
 # critic was z-ai/glm-5.3 until Sept 25, 2026: screened on the real task
 # (reviewing a live buy/hold split), glm-5.3, kimi-k3 and deepseek-v4.1-flash
 # all exhausted connection retries, glm-5.3-flash spent its whole token
 # budget reasoning and returned nothing, and five others 404 on this account.
 # muse-glimmer-30b (Meta, independent of both analysts' labs) answered in 19s
 # with symmetric, fact-grounded challenges.
+# Formation re-checked the same day: muse-glimmer as an analyst said hold on
+# 9 of 9 runs (never buy), and gemma / nemotron-3-super as critics pushed
+# unverified news as catalysts where muse-glimmer challenged it - so the
+# analysts and critic stayed as they are.
+# bias_1 moved off gemma (it would have checked analyst_1's own analysis) to
+# muse-glimmer, the only reliable model independent of both analysts' labs,
+# at the cost of sharing a model with the critic. bias_2 stays on
+# mistral-nemotron, reliable but only partly independent of analyst_2
+# ("produced by Mistral and optimised by NVIDIA"; see spec section 4).
+# technical moved off kimi-k3, which answered 0 of 7 calls on Sept 25 (not
+# even a one-line prompt), to nemotron-3-super: reliable and a reasoning
+# model; sharing analyst_2's model matters less for a role that times
+# entries rather than judging the pick.
 AGENT_MODELS = {
     "macro": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "analyst_1": "google/gemma-4-31b-it",
     "analyst_2": "nvidia/nemotron-3-super-120b-a12b",
     "critic": "meta/muse-glimmer-30b",
-    "bias_1": "google/gemma-4-31b-it",
+    "bias_1": "meta/muse-glimmer-30b",
     "bias_2": "mistralai/mistral-nemotron",
-    "technical": "moonshotai/kimi-k3",
+    "technical": "nvidia/nemotron-3-super-120b-a12b",
 }
+
+# Ordered backups per role, tried when the model before them fails outright
+# or keeps replying unusably. Build endpoints can stop serving for hours
+# (kimi-k3, glm-5.3 and deepseek-v4.1-flash answered nothing at all on Sept
+# 25, 2026 - not even a one-line prompt) and briefly 404 a model that works
+# (nemotron-3-super, same day), which a 2-day unattended run can't ride out
+# on one model per role. Only models that answered reliably that day are
+# listed. The two analysts' lists share no model, and agents also exclude,
+# at call time, any model that would break independence for that call (the
+# other analyst's model; the analysts' models for the critic), so a backup
+# that is fine in general is skipped when it would be checking its own work.
+AGENT_MODEL_BACKUPS: dict[str, list[str]] = {
+    "macro": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
+    "analyst_1": ["meta/muse-glimmer-30b"],
+    "analyst_2": ["mistralai/mistral-nemotron"],
+    "critic": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
+    "bias_1": ["mistralai/mistral-nemotron"],
+    "bias_2": ["meta/muse-glimmer-30b"],
+    "technical": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
+}
+
+
+def role_models(role: str) -> list[str]:
+    """Primary model for `role` followed by its backups, without repeats."""
+    return list(dict.fromkeys([AGENT_MODELS[role], *AGENT_MODEL_BACKUPS.get(role, [])]))
+
+
+# How long a model that just failed a call is tried last instead of first.
+# Long enough that one cycle's later calls skip a dead endpoint instead of
+# each waiting out its retries; short enough that a recovered primary is
+# back in use within the next cycle.
+MODEL_COOLDOWN_SECONDS = 900.0
+
+
+class ModelHealth:
+    """Remembers which models just failed a call, so callers try them last.
+
+    A cooling model is never skipped outright - if every candidate is
+    cooling, they are still tried in their original order - it only loses
+    its place in the queue until MODEL_COOLDOWN_SECONDS pass or it succeeds.
+    Only call failures (connection, HTTP) count; a model that answered with
+    unusable content is up, just unhelpful, and isn't cooled.
+    """
+
+    def __init__(self, cooldown_seconds: float = MODEL_COOLDOWN_SECONDS, clock=time.monotonic):
+        self._cooldown = cooldown_seconds
+        self._clock = clock
+        self._failed_at: dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def record_failure(self, model: str) -> None:
+        with self._lock:
+            self._failed_at[model] = self._clock()
+
+    def record_success(self, model: str) -> None:
+        with self._lock:
+            self._failed_at.pop(model, None)
+
+    def is_cooling(self, model: str) -> bool:
+        with self._lock:
+            failed = self._failed_at.get(model)
+            return failed is not None and self._clock() - failed < self._cooldown
+
+    def order(self, models: list[str]) -> list[str]:
+        cooling = [m for m in models if self.is_cooling(m)]
+        return [m for m in models if m not in cooling] + cooling
+
+
+# Shared by every agent in the process, so a dead endpoint found by one
+# agent is tried last by the next one too.
+DEFAULT_MODEL_HEALTH = ModelHealth()
 
 
 class LlmClient:
@@ -118,8 +201,12 @@ class LlmClient:
         max_tokens: int | None = None,
         timeout: float = DEFAULT_TIMEOUT,
         stream: bool = True,
+        max_retries: int | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
+        """`max_retries` overrides request_with_retry's retry budget for
+        dropped connections and 429/5xx; callers with a backup model pass a
+        small one so a dead endpoint fails over in ~2 min instead of ~7."""
         url = f"{self._settings.nvidia_base_url}/chat/completions"
         payload: dict[str, Any] = {
             "model": model,
@@ -138,6 +225,7 @@ class LlmClient:
         }
 
         attempt = 0
+        retry_budget = {} if max_retries is None else {"max_retries": max_retries}
         while True:
             self._wait_for_rate_limit(model)
             response = request_with_retry(
@@ -148,6 +236,7 @@ class LlmClient:
                 json=payload,
                 timeout=timeout,
                 stream=stream,
+                **retry_budget,
             )
             response.raise_for_status()
             if not stream:

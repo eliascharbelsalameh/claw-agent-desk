@@ -20,11 +20,12 @@ the same way an analyst would be.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from data_layer.llm_client import AGENT_MODELS
+from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
 from .analyst_agent import EVIDENCE_STATUS_NOTE, HORIZON, AnalystVerdict, check_evidence
 from .llm_json import request_json
@@ -74,6 +75,11 @@ class Critique:
     evidence_check: dict[str, int] = field(default_factory=dict)
     dropped_challenges: int = 0
     json_repairs: list[str] = field(default_factory=list)
+    # Models tried before `model` answered, and why each failed.
+    fallbacks: list[dict[str, Any]] = field(default_factory=list)
+    # The critic's configured primary; `model` differs when a backup answered
+    # (including when the primary was excluded or skipped as cooling).
+    primary_model: str | None = None
     error: str | None = None
 
     @property
@@ -128,13 +134,20 @@ class CriticAgent:
         *,
         trace: TraceLogger | None = None,
         model: str | None = None,
+        models: Sequence[str] | None = None,
+        health: ModelHealth | None = None,
         max_tokens: int = CRITIC_MAX_TOKENS,
         temperature: float = CRITIC_TEMPERATURE,
         extra_params: dict[str, Any] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
+        """`models` is the ordered candidate list (primary, then backups);
+        by default the critic's list from AGENT_MODELS/AGENT_MODEL_BACKUPS.
+        Passing `model` pins a single model with no backups."""
         self._llm = llm
-        self.model = model or AGENT_MODELS[AGENT_NAME]
+        self.models = list(models) if models else [model] if model else role_models(AGENT_NAME)
+        self.model = self.models[0]
+        self._health = health if health is not None else DEFAULT_MODEL_HEALTH
         self._trace = trace
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -152,6 +165,7 @@ class CriticAgent:
         critique = Critique(
             symbol=ctx.symbol,
             model=self.model,
+            primary_model=self.model,
             review_round=review_round,
             generated_at=self._now().isoformat(),
         )
@@ -166,11 +180,14 @@ class CriticAgent:
                 ),
             },
         ]
-        base = {"symbol": ctx.symbol, "model": self.model, "review_round": review_round}
-        self._log("llm_request", {**base, "messages": messages})
+        # A critic running on an analyst's model would be reviewing its own
+        # reasoning, so the models the analysts actually used are off limits.
+        exclude = sorted({v.model for v in verdicts.values()})
+        base = {"symbol": ctx.symbol, "review_round": review_round}
+        self._log("llm_request", {**base, "models": self.models, "exclude": exclude, "messages": messages})
         reply = request_json(
             self._llm,
-            self.model,
+            self.models,
             messages,
             validate=lambda obj: validate_critique(obj, roles),
             log=self._log,
@@ -180,7 +197,11 @@ class CriticAgent:
             extra_params=self._extra_params,
             invalid_event="critique_invalid",
             repaired_event="critique_repaired",
+            health=self._health,
+            exclude=exclude,
         )
+        critique.model = reply.model or critique.model
+        critique.fallbacks = reply.fallbacks
         if not reply.ok:
             critique.error = reply.error if reply.call_failed else f"unparseable critique: {reply.error}"
             return critique

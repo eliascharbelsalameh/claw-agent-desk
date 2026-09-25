@@ -14,6 +14,7 @@ from agents.macro_agent import (
     trim_news,
 )
 from agents.trace import TraceLogger
+from data_layer.llm_client import ModelHealth
 
 NOW = datetime(2026, 9, 25, 15, 0, tzinfo=timezone.utc)
 
@@ -26,10 +27,23 @@ def _daily_bars(n=25, start_close=100.0):
     ]
 
 
+# _daily_bars() ends on 2026-08-25; this clock says that session has closed.
+CLOSED_CLOCK = {"timestamp": "2026-08-25T18:00:00-04:00", "is_open": False,
+                "next_close": "2026-08-26T16:00:00-04:00"}
+OPEN_CLOCK = {"timestamp": "2026-08-25T11:00:00-04:00", "is_open": True,
+              "next_close": "2026-08-25T16:00:00-04:00"}
+
+
 class FakeAlpaca:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, clock=CLOSED_CLOCK):
         self.fail = fail
+        self.clock = clock
         self.calls = []
+
+    def get_clock(self):
+        if self.fail or self.clock is None:
+            raise ConnectionError("alpaca down")
+        return self.clock
 
     def get_bars(self, symbol, timeframe="1Hour", start=None, end=None, **kw):
         self.calls.append(("get_bars", symbol, timeframe, start, end))
@@ -37,7 +51,8 @@ class FakeAlpaca:
             raise ConnectionError("alpaca down")
         return _daily_bars()
 
-    def get_relative_volume(self, symbol, lookback_days=20):
+    def get_relative_volume(self, symbol, lookback_days=20, clock=None):
+        self.calls.append(("get_relative_volume", symbol, clock))
         if self.fail:
             raise ConnectionError("alpaca down")
         return {"symbol": symbol, "relative_volume": 1.4, "feed": "iex"}
@@ -130,7 +145,9 @@ def _agent(alpaca=None, llm=None, trace=None):
         finnhub=FakeFinnhub(),
         llm=llm,
         trace=trace,
-        model="test/model",
+        # Named like a Nemotron so it gets the thinking-off flag (briefing_params).
+        model="nvidia/nemotron-test",
+        health=ModelHealth(),
         now=lambda: NOW,
     )
 
@@ -240,9 +257,9 @@ def test_briefing_prompt_forbids_recommendations_and_carries_facts():
     ctx = _agent(llm=llm).run(["AAPL"])["AAPL"]
 
     assert ctx.briefing == GOOD_BRIEFING  # inline reasoning stripped
-    assert ctx.briefing_model == "test/model"
+    assert ctx.briefing_model == "nvidia/nemotron-test"
     model, messages, kwargs = llm.calls[0]
-    assert model == "test/model"
+    assert model == "nvidia/nemotron-test"
     assert kwargs["max_tokens"] >= 1024
     assert kwargs["chat_template_kwargs"] == {"enable_thinking": False}
     system = messages[0]["content"]
@@ -256,7 +273,8 @@ def test_briefing_failure_is_recorded_and_context_still_usable():
     ctx = _agent(llm=FakeLlm(fail=True)).run(["AAPL"])["AAPL"]
     assert ctx.briefing is None
     assert any(g.startswith("briefing: TimeoutError") for g in ctx.data_gaps)
-    assert f"after {BRIEFING_ATTEMPTS} attempts" in ctx.data_gaps[-1]
+    # a failed call moves on to the next model (none here) instead of retrying the same one
+    assert ctx.data_gaps[-1].endswith("(1 attempt across 1 model)")
     assert "no briefing available" in ctx.to_prompt()
 
 
@@ -436,3 +454,23 @@ def test_limitations_are_identical_for_every_stock_and_separate_from_gaps():
     assert any("valuation" in item for item in ok.facts()["limitations"])
     assert any("IEX" in item for item in ok.facts()["limitations"])
     assert ok.data_gaps == []  # limitations never leak into this run's gaps
+
+
+def test_session_in_progress_is_flagged_and_clock_shared_with_relative_volume():
+    alpaca = FakeAlpaca(clock=OPEN_CLOCK)
+    ctx = _agent(alpaca=alpaca).run(["AAPL"])["AAPL"]
+    assert ctx.price["latest_bar_in_progress"] is True
+    assert "latest intraday price" in ctx.price["note"]
+    assert ("get_relative_volume", "AAPL", OPEN_CLOCK) in alpaca.calls
+
+
+def test_closed_session_is_not_flagged():
+    ctx = _agent(alpaca=FakeAlpaca(clock=CLOSED_CLOCK)).run(["AAPL"])["AAPL"]
+    assert ctx.price["latest_bar_in_progress"] is False and "note" not in ctx.price
+
+
+def test_unreadable_clock_is_a_data_gap_for_every_stock():
+    contexts = _agent(alpaca=FakeAlpaca(clock=None)).run(["AAPL", "MSFT"])
+    for ctx in contexts.values():
+        assert any(g.startswith("market clock:") for g in ctx.data_gaps)
+        assert ctx.price["latest_bar_in_progress"] is False

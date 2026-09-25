@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -103,18 +104,29 @@ def repair_json_quotes(body: str) -> tuple[str, list[str]]:
     return "\n".join(lines), fixes
 
 
+# Connection retries per model while a backup model remains; the last
+# candidate gets request_with_retry's full default budget. One retry means a
+# single transient drop doesn't demote a working model, while a dead
+# endpoint (cut off at Build's 60s gateway limit) fails over in ~2 minutes.
+BACKUP_CONNECT_RETRIES = 1
+
+
 @dataclass
 class JsonReply:
     """Outcome of request_json. `value` is whatever `validate` returned;
     `raw` is the parsed object it was built from. On failure both are None
     and `error` says why; `call_failed` separates "the call itself failed"
-    (connection, HTTP) from "the model answered but unusably"."""
+    (connection, HTTP) from "the model answered but unusably". `model` is
+    the model that produced this result (on failure, the last one tried);
+    `fallbacks` lists the models tried before it and why each failed."""
 
     value: Any = None
     raw: dict[str, Any] | None = None
     repairs: list[str] = field(default_factory=list)
     error: str | None = None
     call_failed: bool = False
+    model: str | None = None
+    fallbacks: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -123,7 +135,7 @@ class JsonReply:
 
 def request_json(
     llm: Any,
-    model: str,
+    models: str | Sequence[str],
     messages: list[dict[str, str]],
     *,
     validate: Callable[[dict[str, Any]], Any],
@@ -135,24 +147,93 @@ def request_json(
     attempts: int = PARSE_ATTEMPTS,
     invalid_event: str = "reply_invalid",
     repaired_event: str = "reply_repaired",
+    health: Any | None = None,
+    exclude: Collection[str] = (),
+    backup_retries: int = BACKUP_CONNECT_RETRIES,
 ) -> JsonReply:
-    """Ask `model` for one JSON object that passes `validate`.
+    """Ask for one JSON object that passes `validate`, trying `models` in
+    order until one produces it.
 
     `validate` takes the parsed object and returns the normalized result or
     raises ValueError naming the problem; that message is what the model
-    sees in its correction turn. Every reply and failure is sent to `log`
-    with `base` merged in, so each agent's trace reads the same way.
+    sees in its correction turn. A model that fails outright, or still
+    replies unusably after its correction turn, hands over to the next one
+    with a fresh conversation. `exclude` drops models that would break
+    independence for this call; `health` (a ModelHealth) moves models that
+    just failed to the back of the queue and learns from this call. Every
+    reply and failure is sent to `log` with `base` and the model merged in,
+    so each agent's trace reads the same way.
     """
+    ordered = [models] if isinstance(models, str) else list(dict.fromkeys(models))
+    excluded = set(exclude)
+    candidates = [m for m in ordered if m not in excluded]
+    if not candidates:
+        return JsonReply(error=f"no eligible model: every candidate in {ordered} is excluded", call_failed=True)
+    cooling: set[str] = set()
+    if health is not None:
+        candidates = health.order(candidates)
+        cooling = {m for m in candidates if health.is_cooling(m)}
+    # The last model not known to be down is the best remaining hope, so it
+    # gets request_with_retry's full budget; everything else gets a short
+    # one. A cooling model (it failed a call minutes ago) only ever gets the
+    # short probe, even when tried last - live, a dead endpoint tried last
+    # with the full budget cost ~7 minutes to fail again.
+    healthy = [i for i, m in enumerate(candidates) if m not in cooling]
+    full_budget_at = healthy[-1] if healthy else None
+
+    tried: list[dict[str, Any]] = []
+    reply = JsonReply()
+    for i, model in enumerate(candidates):
+        has_backup = i < len(candidates) - 1
+        reply = _request_one(
+            llm, model, messages,
+            validate=validate, log=log, base=base, max_tokens=max_tokens, temperature=temperature,
+            extra_params=extra_params, attempts=attempts, invalid_event=invalid_event,
+            repaired_event=repaired_event, max_retries=None if i == full_budget_at else backup_retries,
+        )
+        if reply.ok:
+            if health is not None:
+                health.record_success(model)
+            reply.fallbacks = tried
+            return reply
+        if reply.call_failed and health is not None:
+            health.record_failure(model)
+        if has_backup:
+            tried.append({"model": model, "error": reply.error, "call_failed": reply.call_failed})
+            log("fallback", {**base, "from_model": model, "to_model": candidates[i + 1], "reason": reply.error})
+    reply.fallbacks = tried
+    return reply
+
+
+def _request_one(
+    llm: Any,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    validate: Callable[[dict[str, Any]], Any],
+    log: Callable[[str, dict[str, Any]], None],
+    base: dict[str, Any],
+    max_tokens: int,
+    temperature: float,
+    extra_params: dict[str, Any] | None,
+    attempts: int,
+    invalid_event: str,
+    repaired_event: str,
+    max_retries: int | None,
+) -> JsonReply:
+    """One model's turn: call, validate, and at most one correction turn."""
     messages = list(messages)
     error: str | None = None
+    retry_budget = {} if max_retries is None else {"max_retries": max_retries}
     for attempt in range(1, attempts + 1):
-        info = {**base, "attempt": attempt}
+        info = {**base, "model": model, "attempt": attempt}
         try:
             response = llm.chat_completion(
                 model,
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                **retry_budget,
                 **(extra_params or {}),
             )
             choice = response["choices"][0]
@@ -160,7 +241,7 @@ def request_json(
             finish_reason = choice.get("finish_reason")
         except Exception as exc:  # noqa: BLE001 - callers turn this into a failed result
             log("llm_error", {**info, "error": repr(exc)})
-            return JsonReply(error=f"{type(exc).__name__}: {exc}", call_failed=True)
+            return JsonReply(error=f"{type(exc).__name__}: {exc}", call_failed=True, model=model)
 
         log(
             "llm_response",
@@ -196,5 +277,5 @@ def request_json(
 
         if repairs:
             log(repaired_event, {**info, "repairs": repairs})
-        return JsonReply(value=value, raw=raw, repairs=repairs)
-    return JsonReply(error=error)
+        return JsonReply(value=value, raw=raw, repairs=repairs, model=model)
+    return JsonReply(error=error, model=model)

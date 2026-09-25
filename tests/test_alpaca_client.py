@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from data_layer.alpaca_client import AlpacaClient, aggregate_bars
+from data_layer.alpaca_client import AlpacaClient, aggregate_bars, session_in_progress
 from data_layer.config import Settings
 
 
@@ -91,14 +91,62 @@ def test_get_bars_4h_reraises_unexpected_errors(monkeypatch):
         client.get_bars_4h("AAPL")
 
 
+CLOSED_CLOCK = {"timestamp": "2026-09-21T18:00:00-04:00", "is_open": False,
+                "next_open": "2026-09-22T09:30:00-04:00", "next_close": "2026-09-22T16:00:00-04:00"}
+
+
 def test_get_relative_volume(monkeypatch):
     client = AlpacaClient(settings=_settings())
-    bars = [_bar(0, 1, 1, 1, 1, 100, day=d) for d in range(1, 21)] + [
-        _bar(0, 1, 1, 1, 1, 400, day=21)
+    bars = [_bar(4, 1, 1, 1, 1, 100, day=d) for d in range(1, 21)] + [
+        _bar(4, 1, 1, 1, 1, 400, day=21)
     ]
 
     monkeypatch.setattr(client, "get_bars", lambda *a, **k: bars)
-    result = client.get_relative_volume("AAPL", lookback_days=20)
+    result = client.get_relative_volume("AAPL", lookback_days=20, clock=CLOSED_CLOCK)
     assert result["relative_volume"] == pytest.approx(4.0)
     assert result["baseline_avg_volume"] == pytest.approx(100.0)
     assert result["feed"] == "iex"
+    assert result["session_in_progress"] is False
+    assert "in_progress_volume" not in result
+
+
+def test_relative_volume_leaves_out_a_session_still_running(monkeypatch):
+    client = AlpacaClient(settings=_settings())
+    # 20 full days at 100, then day 21 at 300, then today's (day 22) partial 30
+    bars = ([_bar(4, 1, 1, 1, 1, 100, day=d) for d in range(1, 21)]
+            + [_bar(4, 1, 1, 1, 1, 300, day=21), _bar(4, 1, 1, 1, 1, 30, day=22)])
+    monkeypatch.setattr(client, "get_bars", lambda *a, **k: bars)
+    open_clock = {"timestamp": "2026-09-22T10:45:00-04:00", "is_open": True,
+                  "next_open": "2026-09-23T09:30:00-04:00", "next_close": "2026-09-22T16:00:00-04:00"}
+
+    result = client.get_relative_volume("AAPL", lookback_days=20, clock=open_clock)
+
+    assert result["relative_volume"] == pytest.approx(3.0)  # day 21 vs days 1-20, not 30 vs 100
+    assert result["date"].startswith("2026-09-21")
+    assert result["session_in_progress"] is True
+    assert result["in_progress_volume"] == 30 and result["in_progress_date"].startswith("2026-09-22")
+
+
+def test_premarket_bar_counts_as_in_progress_but_yesterday_after_close_does_not():
+    today_bar = _bar(4, 1, 1, 1, 1, 5, day=22)
+    premarket = {"timestamp": "2026-09-22T08:00:00-04:00", "is_open": False,
+                 "next_close": "2026-09-22T16:00:00-04:00"}
+    after_close = {"timestamp": "2026-09-22T17:00:00-04:00", "is_open": False,
+                   "next_close": "2026-09-23T16:00:00-04:00"}
+    assert session_in_progress(today_bar, premarket) is True
+    assert session_in_progress(today_bar, after_close) is False
+    assert session_in_progress(_bar(4, 1, 1, 1, 1, 5, day=21), premarket) is False
+    assert session_in_progress(today_bar, {}) is False
+
+
+def test_relative_volume_without_a_clock_uses_latest_bar_and_says_unknown(monkeypatch):
+    client = AlpacaClient(settings=_settings())
+    bars = [_bar(4, 1, 1, 1, 1, 100, day=d) for d in range(1, 22)]
+    monkeypatch.setattr(client, "get_bars", lambda *a, **k: bars)
+
+    def no_clock():
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(client, "get_clock", no_clock)
+    result = client.get_relative_volume("AAPL", lookback_days=20)
+    assert result["session_in_progress"] is None and result["relative_volume"] == pytest.approx(1.0)

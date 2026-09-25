@@ -28,11 +28,14 @@ class FakeMacro:
 
 
 class FakeAnalyst:
+    excludes: dict = {}
+
     def __init__(self, llm, role, trace=None):
         self.role, self.model = role, f"lab-{role}/m"
         self.index = 0 if role == "analyst_1" else 1
 
-    def analyze(self, ctx):
+    def analyze(self, ctx, exclude=()):
+        FakeAnalyst.excludes[(ctx.symbol, self.role)] = set(exclude)
         return _verdict(ctx.symbol, self.role, FIRST[ctx.symbol][self.index])
 
     def revise(self, ctx, own, other, *, assessment, challenges_to_me, challenges_to_other, review_round):
@@ -74,11 +77,14 @@ def test_full_pipeline_prints_cross_check_and_critic_loop(run_cli):
     assert "AAPL cross-check: CRITIC" in out
     assert "AAPL critic loop (split): AGREE (hold) - after round 1: both analysts recommend hold" in out
     assert "analyst_1 buy->hold (accepted 1, rejected 0)" in out
-    assert "critic: AAPL critique" in out
+    assert "critic [critic/m]: AAPL critique" in out
     assert "MSFT cross-check: AGREE (buy)" in out
     assert "MSFT critic loop (agreed_buy): AGREE (buy)" in out
     assert "NVDA cross-check: AGREE (hold)" in out
     assert "NVDA critic loop (" not in out  # agreed hold skips the critic
+    # analyst_2 may not use the model analyst_1 actually ran on
+    assert FakeAnalyst.excludes[("AAPL", "analyst_1")] == set()
+    assert FakeAnalyst.excludes[("AAPL", "analyst_2")] == {"lab-analyst_1/m"}
 
 
 def test_no_critic_stops_at_the_cross_check(run_cli):

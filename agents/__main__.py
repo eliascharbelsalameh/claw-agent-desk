@@ -34,6 +34,10 @@ CROSS_CHECK_ROLES = ("analyst_1", "analyst_2")
 
 def _summary(v: AnalystVerdict) -> str:
     head = f"{v.symbol} {v.role} ({v.model})"
+    if v.fallbacks:
+        head += f" [backup: {', '.join(f['model'] for f in v.fallbacks)} failed first]"
+    elif v.used_backup:
+        head += f" [backup: primary {v.primary_model} not used - failed recently or excluded]"
     if not v.ok:
         return f"{head}: FAILED - {v.error}"
     check = v.evidence_check
@@ -59,7 +63,9 @@ def _loop_summary(result: CriticLoopResult) -> str:
             for role, v in r["verdicts"].items()
         )
         lines.append(f"  round {r['round']}: critic challenged {per_role}; re-votes: {votes}")
-        lines.append(f"    critic: {critique['assessment']}")
+        primary = critique.get("primary_model")
+        backup = " (backup)" if primary and critique.get("model") != primary else ""
+        lines.append(f"    critic [{critique.get('model')}{backup}]: {critique['assessment']}")
     head = f"{result.symbol} critic loop ({result.trigger}): {result.outcome.upper()}"
     if result.recommendation:
         head += f" ({result.recommendation})"
@@ -104,7 +110,9 @@ def main() -> None:
             continue
         verdicts = {}
         for role, analyst in analysts.items():
-            verdicts[role] = analyst.analyze(ctx)
+            # An analyst never runs on a model another analyst already used
+            # (a backup could otherwise land two analysts on one model).
+            verdicts[role] = analyst.analyze(ctx, exclude={v.model for v in verdicts.values()})
             print(_summary(verdicts[role]), flush=True)
         if not set(CROSS_CHECK_ROLES) <= verdicts.keys():
             continue
