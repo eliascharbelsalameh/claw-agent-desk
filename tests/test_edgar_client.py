@@ -37,6 +37,8 @@ def _settings(**overrides):
         fred_api_key=None,
         finnhub_api_key=None,
         edgar_user_agent="TestApp test@example.com",
+        nvidia_api_key=None,
+        nvidia_base_url="",
         cache_dir=Path("/tmp/x"),
     )
     base.update(overrides)

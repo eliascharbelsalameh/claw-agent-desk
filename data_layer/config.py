@@ -24,6 +24,8 @@ class Settings:
     fred_api_key: str | None
     finnhub_api_key: str | None
     edgar_user_agent: str | None
+    nvidia_api_key: str | None
+    nvidia_base_url: str
     cache_dir: Path
 
     def require(self, field: str) -> str:
@@ -48,5 +50,7 @@ def get_settings() -> Settings:
         fred_api_key=os.getenv("FRED_API_KEY"),
         finnhub_api_key=os.getenv("FINNHUB_API_KEY"),
         edgar_user_agent=os.getenv("SEC_EDGAR_USER_AGENT"),
+        nvidia_api_key=os.getenv("NVIDIA_API_KEY"),
+        nvidia_base_url=os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
         cache_dir=Path(os.getenv("DATA_LAYER_CACHE_DIR", ".cache")),
     )

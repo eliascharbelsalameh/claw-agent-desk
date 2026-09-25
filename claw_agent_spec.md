@@ -48,14 +48,25 @@ Every agent's input and output is logged with a timestamp, so the demo video can
 
 ## 4. Models and rate limits
 
-Use the NVIDIA Build endpoints (free, OpenAI-compatible).
+Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-compatible). Implemented in `data_layer/llm_client.py`.
 
-- **Available on Build** (verify on build.nvidia.com; "free endpoint" labels change): Nemotron 3 Super 120B and Nano 30B, Qwen 3.5 (122B and 397B), Kimi K2.5 (listed in an OpenClaw provider catalog with free access).
-- **Free tier limits:** about 40 requests/minute per model (per a Build package README and forum users). Users mention 1,000 starting credits that can drain quickly. NVIDIA moderators say limits depend on model, use case, and traffic, with no official way to raise them on the free tier.
+- **Catalog has drifted from this spec's original picks**, and drifted again mid-build: Qwen 3.5 (122B/397B) is no longer on Build at all. The first pass at `AGENT_MODELS` (picked from `docs.api.nvidia.com/nim/reference/...` pages) turned out to include two models that are genuinely dead — `z-ai/glm4.7` and `deepseek-ai/deepseek-v4-flash` both returned HTTP 410 Gone ("reached end of life") on a real call. Lesson: neither the marketing catalog page nor the per-model reference docs are reliable enough on their own — `GET /v1/models` on the live account plus an actual `chat_completion` call (some catalog-listed models 404 with "Not found for account" despite being listed) is the only way to know a model id is real *and* usable on a given account.
+- **Current per-agent model assignment** (`AGENT_MODELS` in `llm_client.py`), one family per role for independence — every id below was live-verified with a real call against the account checked (Sept 2026):
+  | Role | Model id | Notes |
+  |---|---|---|
+  | macro/context | `nvidia/nemotron-3.5-lightning-30b-a3b` | reasoning model, emits chain-of-thought |
+  | analyst 1 | `openai/gpt-oss-20b` | reasoning model; slow, took up to ~90s in testing |
+  | analyst 2 | `nvidia/nemotron-3-super-120b-a12b` | reasoning model |
+  | critic | `z-ai/glm-5.3` | reasoning model; original pick `z-ai/glm4.7` was 410 Gone |
+  | bias 1 | `google/gemma-4-31b-it` | fast, non-reasoning, replies cleanly |
+  | bias 2 | `mistralai/mistral-nemotron` | fast, non-reasoning, replies cleanly |
+  | technical | `moonshotai/kimi-k3` | reasoning model; original pick `deepseek-ai/deepseek-v4-flash` was 410 Gone, and its live replacement `deepseek-ai/deepseek-v4.1-flash` failed with a consistent connection drop rather than answering |
+- **Several of these are reasoning models** (hidden chain-of-thought before visible content) — they need a generous `max_tokens` or they hit `finish_reason: "length"` with empty `content`, and `llm_client.py`'s `DEFAULT_TIMEOUT` is 120s (not the 15s used elsewhere in the data layer) because of how slow `gpt-oss-20b` in particular was.
+- **Free/trial tier limits:** confirmed ~40 requests/minute on the account checked (Sept 2026). Per-model limits for the others above aren't shown anywhere in the dashboard, so `llm_client.py` applies the same 40 RPM budget to every model by default (`DEFAULT_RPM_LIMIT`, overridable per model) as a conservative assumption, paced client-side on top of the existing 429 retry/backoff.
+- **Credits, separate from RPM:** trial accounts get ~1,000 inference credits on signup (personal email), up to ~5,000 with a business email / "Request More". Credits deduct per call regardless of RPM headroom — a multi-day continuous run could exhaust credits before hitting any rate ceiling. Not yet measured against real usage.
 - **Estimated load:** a few dozen LLM calls per stock cycle, well under 40 RPM unless loops get chatty.
-- **Design choice:** assign a different model family to each agent (for example Qwen for one analyst, Nemotron for the other, Kimi for the critic). If limits are per model this spreads the load, and it makes the agents more independent.
-- **Must have:** retry with backoff on HTTP 429 in every LLM call.
-- **To check:** how credits are consumed (Build dashboard). Kimi's own Moonshot API limits (not checked, Build is the simpler path).
+- **Must have:** retry with backoff on HTTP 429 in every LLM call — done, `llm_client.py` calls go through the same `http_utils.request_with_retry` as every other data-layer client.
+- **To check:** how credits are consumed over a multi-day run (Build dashboard) — no data yet since no live run has started.
 - **Self-hosting:** not realistic on Oracle A1 (no GPU), so the endpoints are the route.
 
 ## 5. Data sources (US stocks only)
@@ -116,7 +127,7 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 
 ## 9. Open questions
 
-- Which model goes to which agent (see section 4)?
+- Model-to-agent assignment is now decided (section 4) but not yet battle-tested against real traffic — revisit if any model turns out unavailable/slower than expected once agents are actually built.
 - Should decisions be executed on the Alpaca paper account, or only logged?
 - Final list of the three stocks?
 - Is FT content usable programmatically, and is Barron's worth buying?
