@@ -55,12 +55,12 @@ Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-co
   | Role | Model id | Notes |
   |---|---|---|
   | macro/context | `nvidia/nemotron-3.5-lightning-30b-a3b` | reasoning model, emits chain-of-thought |
-  | analyst 1 | `openai/gpt-oss-20b` | reasoning model; slow, took up to ~90s in testing |
+  | analyst 1 | `google/gemma-4-31b-it` | non-reasoning; replaced `openai/gpt-oss-20b` on Sept 25 (failed 5/15 calls, 65–400s when it answered). Deterministic at temperature 0 |
   | analyst 2 | `nvidia/nemotron-3-super-120b-a12b` | reasoning model |
-  | critic | `z-ai/glm-5.3` | reasoning model; original pick `z-ai/glm4.7` was 410 Gone |
-  | bias 1 | `google/gemma-4-31b-it` | fast, non-reasoning, replies cleanly |
+  | critic | `z-ai/glm-5.3` | reasoning model; original pick `z-ai/glm4.7` was 410 Gone. **Unreliable on Sept 25:** 1 of 2 analyst-sized calls answered (382s), the other exhausted retries — re-test before building the critic |
+  | bias 1 | `google/gemma-4-31b-it` | **must be reassigned**: now also analyst 1, and a bias check by the same model would not be independent |
   | bias 2 | `mistralai/mistral-nemotron` | fast, non-reasoning, replies cleanly |
-  | technical | `moonshotai/kimi-k3` | reasoning model; original pick `deepseek-ai/deepseek-v4-flash` was 410 Gone, and its live replacement `deepseek-ai/deepseek-v4.1-flash` failed with a consistent connection drop rather than answering |
+  | technical | `moonshotai/kimi-k3` | reasoning model; original pick `deepseek-ai/deepseek-v4-flash` was 410 Gone, and its live replacement `deepseek-ai/deepseek-v4.1-flash` failed with a consistent connection drop rather than answering. **Unreliable on Sept 25:** 0 of 2 analyst-sized calls answered (retries exhausted) — re-test before building the technical agent |
 - **Several of these are reasoning models** (hidden chain-of-thought before visible content) — they need a generous `max_tokens` or they hit `finish_reason: "length"` with empty `content`, and `llm_client.py`'s `DEFAULT_TIMEOUT` is 120s (not the 15s used elsewhere in the data layer) because of how slow `gpt-oss-20b` in particular was.
 - **Gateway 60s idle cutoff (found Sept 25, 2026):** Build closes any connection that sends no bytes for 60s, so non-streaming calls to reasoning models fail at exactly 60s. `llm_client.py` now streams by default. Streams also drop mid-response under load, and output from a degraded backend can turn into degenerate text, so agents retry and validate what they forward.
 - **Thinking can be switched off on Nemotron models** via `chat_template_kwargs={"enable_thinking": false}`. The macro/context role uses it: with thinking on, the macro model spent its full 4,096-token budget reasoning (inside `content`) without producing a briefing; with it off, the same prompt returned a complete briefing in ~20–40s.
@@ -131,7 +131,7 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 
 - Model-to-agent assignment is now decided (section 4) but not yet battle-tested against real traffic — revisit if any model turns out unavailable/slower than expected once agents are actually built.
 - **Decided (Sept 25):** positions are long-only in real shares — no shorting, derivatives, leverage or negotiated deals.
-- **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). Plus a confidence floor: both ≥ 0.66 for a buy. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once.
+- **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). No confidence floor: tested and dropped, since the two models report confidence on different scales. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once.
 - **Decided (Sept 25):** analyst horizon is the next 2–5 trading days, a forward projection judged only from data available now, so the ~2-day paper run can test the calls on camera.
 - Should decisions be executed on the Alpaca paper account, or only logged?
 - Final list of the three stocks?

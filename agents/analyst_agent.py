@@ -40,10 +40,17 @@ RECOMMENDATIONS = ("buy", "hold", "avoid")
 # stated - what to weigh at this range is left to the analysts, unsteered.
 HORIZON = "the next 2 to 5 trading days"
 
-# gpt-oss-20b reasons before answering; the reasoning shares this budget
-# with the JSON. Measured live: see CLAUDE.md for the numbers.
+# Reasoning models (analyst_2's Nemotron) spend part of this budget on
+# hidden reasoning before the JSON; observed completions stay under ~3k.
 ANALYST_MAX_TOKENS = 8192
 PARSE_ATTEMPTS = 2
+
+# At 0.2, 4 of 6 stock/analyst pairs flipped between buy and hold across 5
+# repeats on identical input. At 0 (Sept 25, 2026), gemma-4-31b-it returned
+# the identical verdict and confidence every time; nemotron-3-super still
+# split 2-1 on two of three stocks (reasoning models on Build are not
+# deterministic even at 0), so disagreements remain for the critic loop.
+ANALYST_TEMPERATURE = 0.0
 
 # Relative tolerance when comparing a cited number with the fact it names:
 # models round (0.6073944 -> 0.61), and that is not a hallucination.
@@ -277,6 +284,7 @@ class AnalystAgent:
         trace: TraceLogger | None = None,
         model: str | None = None,
         max_tokens: int = ANALYST_MAX_TOKENS,
+        temperature: float = ANALYST_TEMPERATURE,
         extra_params: dict[str, Any] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
@@ -285,6 +293,7 @@ class AnalystAgent:
         self.model = model or AGENT_MODELS[role]
         self._trace = trace
         self._max_tokens = max_tokens
+        self._temperature = temperature
         self._extra_params = extra_params or {}
         self._now = now
 
@@ -309,7 +318,11 @@ class AnalystAgent:
             base = {"symbol": ctx.symbol, "model": self.model, "attempt": attempt}
             try:
                 response = self._llm.chat_completion(
-                    self.model, messages, max_tokens=self._max_tokens, **self._extra_params
+                    self.model,
+                    messages,
+                    max_tokens=self._max_tokens,
+                    temperature=self._temperature,
+                    **self._extra_params,
                 )
                 choice = response["choices"][0]
                 content = choice["message"].get("content") or ""

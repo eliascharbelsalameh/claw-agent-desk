@@ -57,9 +57,17 @@ DEFAULT_RPM_LIMIT = 40
 DEFAULT_TIMEOUT = 120.0
 STREAM_RETRIES = 2
 
+# analyst_1 was openai/gpt-oss-20b until Sept 25, 2026: it failed 5 of 15
+# calls (connection retries exhausted) and took 65-400s when it answered.
+# gemma-4-31b-it was the only non-Nemotron candidate that answered reliably
+# in a side-by-side screen (glm-5.3/-flash and kimi-k3 mostly dropped;
+# kimi-k2.6, mistral-large-2, palmyra-fin 404 on this account), and at
+# temperature 0 it returned identical verdicts across repeats.
+# bias_1 still points at the same model and must be reassigned before the
+# bias agents are built, or one model would be checking its own analysis.
 AGENT_MODELS = {
     "macro": "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "analyst_1": "openai/gpt-oss-20b",
+    "analyst_1": "google/gemma-4-31b-it",
     "analyst_2": "nvidia/nemotron-3-super-120b-a12b",
     "critic": "z-ai/glm-5.3",
     "bias_1": "google/gemma-4-31b-it",
