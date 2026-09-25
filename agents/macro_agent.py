@@ -148,6 +148,15 @@ Write plain text with these sections: {", ".join(BRIEFING_SECTIONS)}. Be concise
 
 
 @dataclass
+class SharedContext:
+    """Fetched once per run and shared by every stock (see MacroContextAgent.prepare)."""
+
+    macro: dict[str, Any]
+    gaps: list[str]
+    clock: dict[str, Any] | None
+
+
+@dataclass
 class StockContext:
     symbol: str
     generated_at: str
@@ -691,15 +700,26 @@ class MacroContextAgent:
                 "session is still running, so the latest price and volume may be partial"
             ]
 
+    def prepare(self) -> SharedContext:
+        """What every stock in a run shares: macro series and the market
+        clock, fetched once so all stocks are judged against the same data."""
+        macro, macro_gaps = self.gather_macro()
+        clock, clock_gaps = self.market_clock()
+        return SharedContext(macro=macro, gaps=macro_gaps + clock_gaps, clock=clock)
+
+    def build_context(self, symbol: str, shared: SharedContext) -> StockContext:
+        """One stock's full context packet: gather, log, then brief."""
+        ctx = self.gather_stock(symbol, shared.macro, shared.gaps, clock=shared.clock)
+        self._log("context_gathered", {"symbol": ctx.symbol, "facts": ctx.facts()})
+        self.write_briefing(ctx)
+        return ctx
+
     def run(self, symbols: list[str]) -> dict[str, StockContext]:
         """Context packet per symbol. Macro and the market clock are fetched
         once and shared."""
-        macro, macro_gaps = self.gather_macro()
-        clock, clock_gaps = self.market_clock()
+        shared = self.prepare()
         contexts: dict[str, StockContext] = {}
         for symbol in symbols:
-            ctx = self.gather_stock(symbol, macro, macro_gaps + clock_gaps, clock=clock)
-            self._log("context_gathered", {"symbol": ctx.symbol, "facts": ctx.facts()})
-            self.write_briefing(ctx)
+            ctx = self.build_context(symbol, shared)
             contexts[ctx.symbol] = ctx
         return contexts

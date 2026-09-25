@@ -16,20 +16,11 @@ decision.
 from __future__ import annotations
 
 import argparse
-from datetime import datetime, timezone
-from pathlib import Path
 
-from data_layer import AlpacaClient, DiskCache, EdgarClient, FinnhubClient, FredClient, get_settings
-from data_layer.llm_client import LlmClient
-
-from .analyst_agent import AnalystAgent, AnalystVerdict
-from .critic_agent import CriticAgent
-from .critic_loop import CriticLoopResult, needs_critic, run_critic_loop
-from .cross_check import cross_check
-from .macro_agent import MacroContextAgent
+from .analyst_agent import AnalystVerdict
+from .critic_loop import CriticLoopResult
+from .pipeline import CROSS_CHECK_ROLES, DeskPipeline, default_trace_path
 from .trace import TraceLogger
-
-CROSS_CHECK_ROLES = ("analyst_1", "analyst_2")
 
 
 def _summary(v: AnalystVerdict) -> str:
@@ -86,51 +77,28 @@ def main() -> None:
     if args.no_llm and args.analysts:
         parser.error("--analysts needs the LLM; drop --no-llm")
 
-    settings = get_settings()
-    cache = DiskCache(settings.cache_dir)
-    trace = TraceLogger(
-        Path(args.log_dir) / f"trace-{datetime.now(timezone.utc):%Y%m%d}.jsonl"
-    )
-    llm = None if args.no_llm else LlmClient(settings=settings)
-    agent = MacroContextAgent(
-        alpaca=AlpacaClient(settings=settings, cache=cache),
-        fred=FredClient(settings=settings, cache=cache),
-        edgar=EdgarClient(settings=settings, cache=cache),
-        finnhub=FinnhubClient(settings=settings, cache=cache),
-        llm=llm,
+    trace = TraceLogger(default_trace_path(args.log_dir))
+    pipeline = DeskPipeline.from_settings(
         trace=trace,
+        use_llm=not args.no_llm,
+        analyst_roles=tuple(args.analysts),
+        run_critic=not args.no_critic,
     )
-    analysts = {role: AnalystAgent(llm, role, trace=trace) for role in args.analysts}
-    critic = None if args.no_critic else CriticAgent(llm, trace=trace)
 
-    for ctx in agent.run(args.symbols).values():
-        if not analysts:
-            print(ctx.to_prompt())
+    def on_event(stage: str, symbol: str, payload) -> None:
+        if stage == "context" and not args.analysts:
+            print(payload.to_prompt())
             print()
-            continue
-        verdicts = {}
-        for role, analyst in analysts.items():
-            # An analyst never runs on a model another analyst already used
-            # (a backup could otherwise land two analysts on one model).
-            verdicts[role] = analyst.analyze(ctx, exclude={v.model for v in verdicts.values()})
-            print(_summary(verdicts[role]), flush=True)
-        if not set(CROSS_CHECK_ROLES) <= verdicts.keys():
-            continue
-        result = cross_check(*(verdicts[r] for r in CROSS_CHECK_ROLES), trace=trace)
-        print(f"{ctx.symbol} cross-check: {result.outcome.upper()}"
-              f"{f' ({result.recommendation})' if result.recommendation else ''} - {result.reason}",
-              flush=True)
-        trigger = needs_critic(result)
-        if critic is not None and trigger is not None:
-            loop = run_critic_loop(
-                ctx,
-                {r: verdicts[r] for r in CROSS_CHECK_ROLES},
-                {r: analysts[r] for r in CROSS_CHECK_ROLES},
-                critic,
-                trigger,
-                trace=trace,
-            )
-            print(_loop_summary(loop), flush=True)
+        elif stage == "verdict":
+            print(_summary(payload), flush=True)
+        elif stage == "cross_check":
+            print(f"{symbol} cross-check: {payload.outcome.upper()}"
+                  f"{f' ({payload.recommendation})' if payload.recommendation else ''} - {payload.reason}",
+                  flush=True)
+        elif stage == "critic_loop":
+            print(_loop_summary(payload), flush=True)
+
+    pipeline.run(args.symbols, on_event)
     print(f"trace: {trace.path}")
 
 

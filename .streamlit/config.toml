@@ -1,0 +1,10 @@
+# Local-only by default: the app has a button that spends Build credits and
+# shows trace data, so it must not listen on the network. Streamlit's default
+# binds every interface (it printed Network and External URLs when tested).
+[server]
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false
+serverAddress = "localhost"
