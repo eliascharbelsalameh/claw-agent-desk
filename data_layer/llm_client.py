@@ -65,11 +65,17 @@ STREAM_RETRIES = 2
 # temperature 0 it returned identical verdicts across repeats.
 # bias_1 still points at the same model and must be reassigned before the
 # bias agents are built, or one model would be checking its own analysis.
+# critic was z-ai/glm-5.3 until Sept 25, 2026: screened on the real task
+# (reviewing a live buy/hold split), glm-5.3, kimi-k3 and deepseek-v4.1-flash
+# all exhausted connection retries, glm-5.3-flash spent its whole token
+# budget reasoning and returned nothing, and five others 404 on this account.
+# muse-glimmer-30b (Meta, independent of both analysts' labs) answered in 19s
+# with symmetric, fact-grounded challenges.
 AGENT_MODELS = {
     "macro": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "analyst_1": "google/gemma-4-31b-it",
     "analyst_2": "nvidia/nemotron-3-super-120b-a12b",
-    "critic": "z-ai/glm-5.3",
+    "critic": "meta/muse-glimmer-30b",
     "bias_1": "google/gemma-4-31b-it",
     "bias_2": "mistralai/mistral-nemotron",
     "technical": "moonshotai/kimi-k3",

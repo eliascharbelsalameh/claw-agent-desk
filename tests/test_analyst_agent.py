@@ -143,7 +143,7 @@ def test_check_evidence_flags_mismatch_and_unknown_paths():
         {"fact": "fundamentals.free_cash_flow.value", "value": 1},
     ]
     counts = check_evidence(evidence, _ctx().facts())
-    assert counts == {"verified": 1, "wrong_index": 0, "mismatch": 1, "unknown_path": 1}
+    assert counts == {"matches_source": 1, "wrong_index": 0, "mismatch": 1, "unknown_path": 1}
     assert evidence[1]["status"] == "mismatch" and evidence[1]["actual"] == 7.15
     assert evidence[2]["status"] == "unknown_path"
 
@@ -157,7 +157,7 @@ def test_check_evidence_distinguishes_wrong_index_from_fabrication():
         {"fact": "news[0].headline", "value": "Apple buys the moon"},           # fabricated
     ]
     counts = check_evidence(evidence, ctx.facts())
-    assert counts == {"verified": 0, "wrong_index": 2, "mismatch": 1, "unknown_path": 0}
+    assert counts == {"matches_source": 0, "wrong_index": 2, "mismatch": 1, "unknown_path": 0}
     assert evidence[0]["found_at"] == "news[1].headline"
     assert evidence[1]["found_at"] == "news[1].headline"
     assert evidence[2]["actual"] == "Synack expands pen testing"
@@ -173,7 +173,7 @@ def test_analyze_returns_checked_verdict_and_logs(tmp_path):
     assert verdict.ok
     assert verdict.recommendation == "buy" and verdict.confidence == 0.7
     assert verdict.evidence_check == {
-        "verified": 3, "wrong_index": 0, "mismatch": 0, "unknown_path": 0,
+        "matches_source": 3, "wrong_index": 0, "mismatch": 0, "unknown_path": 0,
     }
     assert verdict.role == "analyst_1" and verdict.model == "test/model"
 

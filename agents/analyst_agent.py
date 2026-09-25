@@ -13,6 +13,10 @@ context plus the value found there, and check_evidence() resolves each
 path and compares. An analyst that quotes a number not in the data is
 flagged in the verdict (and the trace), not silently believed.
 
+In the critic loop (critic_loop.py) an analyst also revises its verdict:
+it sees its own previous verdict, the other analyst's, and the critic's
+challenges, and re-votes (`revise`).
+
 A verdict that can't be parsed after one correction turn comes back with
 `error` set. Downstream must treat that as "no pick" - an analyst that
 failed to answer must never count as agreement.
@@ -27,6 +31,12 @@ from typing import Any, Callable
 
 from data_layer.llm_client import AGENT_MODELS
 
+from .llm_json import (  # noqa: F401 - parsing helpers re-exported for existing callers
+    PARSE_ATTEMPTS,
+    extract_json_object,
+    repair_json_quotes,
+    request_json,
+)
 from .macro_agent import IEX_VOLUME_NOTE, StockContext
 from .trace import TraceLogger
 
@@ -43,7 +53,6 @@ HORIZON = "the next 2 to 5 trading days"
 # Reasoning models (analyst_2's Nemotron) spend part of this budget on
 # hidden reasoning before the JSON; observed completions stay under ~3k.
 ANALYST_MAX_TOKENS = 8192
-PARSE_ATTEMPTS = 2
 
 # At 0.2, 4 of 6 stock/analyst pairs flipped between buy and hold across 5
 # repeats on identical input. At 0 (Sept 25, 2026), gemma-4-31b-it returned
@@ -55,6 +64,15 @@ ANALYST_TEMPERATURE = 0.0
 # Relative tolerance when comparing a cited number with the fact it names:
 # models round (0.6073944 -> 0.61), and that is not a hallucination.
 EVIDENCE_REL_TOL = 0.01
+
+# Shown to every agent that sees check_evidence statuses (the critic, and
+# analysts re-voting on each other's verdicts).
+EVIDENCE_STATUS_NOTE = (
+    'Each evidence item\'s "status" comes from an automatic check of the quote against the '
+    'source facts. "matches_source" only means the quoted value is what the source facts say; '
+    "it does not make the underlying claim true. A news headline or summary with that status is "
+    "still unverified third-party reporting."
+)
 
 SYSTEM_PROMPT = f"""You are an equity analyst on a research desk. You receive a context packet for one US stock and decide whether it belongs in a long-only portfolio over {HORIZON}. A second analyst, on a different model, analyses the same packet independently; if you disagree, the stock is not picked, so only recommend "buy" when the evidence genuinely supports it.
 
@@ -81,6 +99,31 @@ Reply with ONLY a JSON object, no prose before or after, with exactly these keys
 }}
 Give at least 3 evidence items, each pointing at a real path in the source facts."""
 
+# Appended to the context packet when an analyst re-votes in the critic loop.
+REVISION_PROMPT = """=== REVIEW ROUND {review_round} ===
+Before any decision, your verdict was reviewed together with that of a second analyst (a different model, same context packet), and a critic challenged the reasoning of both. You are {role}.
+
+Your previous verdict:
+{own}
+
+The other analyst's verdict:
+{other}
+
+The critic's assessment:
+{assessment}
+
+The critic's challenges to you:
+{mine}
+
+The critic's challenges to the other analyst:
+{theirs}
+
+{status_note}
+
+The critic is another model and can be wrong. Check each challenge addressed to you against the source facts: accept it only if the facts support it, and reject it, saying why, if they don't or if it doesn't matter for the recommendation. Change your recommendation only if the challenges you accept expose a real error, a fact you ignored, or an argument you cannot answer from the source facts. Do not change it just to agree with the other analyst, and do not keep it just to stay consistent.
+
+The same rules and the same JSON format apply, with one extra key, "response_to_critique": a list with one entry per challenge addressed to you, each {{"point": "the challenge's point", "accept": true or false, "reason": "one or two sentences"}}. Use an empty list if there were no challenges to you."""
+
 
 @dataclass
 class AnalystVerdict:
@@ -98,103 +141,55 @@ class AnalystVerdict:
     evidence_check: dict[str, int] = field(default_factory=dict)
     # Quote fixes applied to the reply's JSON before it parsed (empty = none).
     json_repairs: list[str] = field(default_factory=list)
+    # 0 for the independent first verdict; n after critic round n.
+    review_round: int = 0
+    previous_recommendation: str | None = None
+    # One {point, accept, reason} per challenge the analyst answered; accept
+    # is None when the model didn't say (e.g. it replied in free text).
+    response_to_critique: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None
 
+    @property
+    def changed(self) -> bool:
+        """Whether a revised verdict changed its recommendation."""
+        return self.previous_recommendation is not None and self.recommendation != self.previous_recommendation
+
+    @property
+    def challenges_accepted(self) -> int:
+        return sum(1 for r in self.response_to_critique if r.get("accept") is True)
+
+    @property
+    def challenges_rejected(self) -> int:
+        return sum(1 for r in self.response_to_critique if r.get("accept") is False)
+
+    def brief(self) -> dict[str, Any]:
+        """What the other agents see of this verdict: the argument and its
+        checked evidence, but not the model (it would invite brand bias)
+        or the confidence (the models report it on different scales)."""
+        brief: dict[str, Any] = {
+            "recommendation": self.recommendation,
+            "thesis": self.thesis,
+            "drivers": self.drivers,
+            "risks": self.risks,
+            "evidence": [
+                {k: e[k] for k in ("fact", "value", "why", "status", "found_at", "actual") if k in e}
+                for e in self.evidence
+            ],
+            "data_concerns": self.data_concerns,
+        }
+        if self.response_to_critique:
+            brief["response_to_critique"] = self.response_to_critique
+        return brief
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 # --- parsing / validation (no LLM) ---
-
-_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
-
-
-def extract_json_object(text: str, repairs: list[str] | None = None) -> dict[str, Any]:
-    """The outermost {...} in a reply, tolerating code fences and stray
-    prose around it. Raises ValueError if there is no parseable object.
-
-    If the JSON doesn't parse, repair_json_quotes gets one try; when that
-    produces valid JSON, a description of each fix is appended to `repairs`
-    (if given) so the caller can log exactly what was changed.
-    """
-    text = _FENCE_RE.sub("", text.strip())
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("no JSON object found in reply")
-    body = text[start : end + 1]
-    try:
-        obj = json.loads(body)
-    except json.JSONDecodeError as exc:
-        repaired, fixes = repair_json_quotes(body)
-        try:
-            obj = json.loads(repaired) if fixes else None
-        except json.JSONDecodeError:
-            obj = None
-        if obj is None:
-            raise ValueError(f"invalid JSON: {exc}") from exc
-        if repairs is not None:
-            repairs.extend(fixes)
-    if not isinstance(obj, dict):
-        raise ValueError("reply JSON is not an object")
-    return obj
-
-
-# `"key": value` on one line, as models pretty-print their JSON.
-_KEY_VALUE_RE = re.compile(r'^(\s*"[^"\\]+"\s*:\s*)(.*?)\s*$')
-# A value that is already valid JSON syntax at its start.
-_JSON_VALUE_START_RE = re.compile(r'^(["\[{]|-?\d|true\b|false\b|null\b)')
-
-
-def _has_closing_quote(line: str) -> bool:
-    """For a line starting with '"', whether an unescaped closing quote follows."""
-    escaped = False
-    for ch in line[1:]:
-        if escaped:
-            escaped = False
-        elif ch == "\\":
-            escaped = True
-        elif ch == '"':
-            return True
-    return False
-
-
-def repair_json_quotes(body: str) -> tuple[str, list[str]]:
-    """Add the quotes a model left off string values, and nothing else.
-
-    nemotron-3-super repeatedly emitted exactly these shapes (5 of 38
-    replies on Sept 25, 2026, and its correction turn reproduced them
-    character for character):
-      "why": Indicates strong growth.        <- both quotes missing
-      "why": Indicates strong growth."       <- opening quote missing
-      "Continued heavy AI capex could ...    <- list item never closed
-    Only whole lines are touched and no word of the content changes; the
-    caller re-parses and re-validates, so a wrong guess fails as before.
-    """
-    lines = body.split("\n")
-    fixes: list[str] = []
-    for i, line in enumerate(lines):
-        match = _KEY_VALUE_RE.match(line)
-        if match:
-            prefix, value = match.groups()
-            if not value or _JSON_VALUE_START_RE.match(value):
-                continue
-            comma = value.endswith(",")
-            inner = value[:-1].rstrip() if comma else value
-            if inner.endswith('"') and not inner.endswith('\\"'):
-                inner = inner[:-1]
-            lines[i] = prefix + json.dumps(inner, ensure_ascii=False) + ("," if comma else "")
-            fixes.append(f"line {i + 1}: quoted the unquoted value of {prefix.strip().rstrip(':').strip()}")
-            continue
-        stripped = line.strip()
-        if stripped.startswith('"') and not _has_closing_quote(stripped):
-            following = next((l.strip() for l in lines[i + 1 :] if l.strip()), "")
-            lines[i] = line.rstrip() + ('"' if following.startswith(("]", "}")) else '",')
-            fixes.append(f"line {i + 1}: closed an unterminated string")
-    return "\n".join(lines), fixes
 
 
 def _str_list(obj: dict[str, Any], key: str, required: bool) -> list[str]:
@@ -241,6 +236,52 @@ def validate_verdict(obj: dict[str, Any]) -> dict[str, Any]:
         "evidence": [dict(item) for item in evidence],
         "data_concerns": _str_list(obj, "data_concerns", required=False),
     }
+
+
+def _as_text(value: Any) -> str | None:
+    """Free-text field that models sometimes return as a list or object."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, list):
+        return " ".join(str(v).strip() for v in value if str(v).strip()) or None
+    return json.dumps(value, ensure_ascii=False)
+
+
+_ACCEPT_WORDS = {"true", "yes", "accept", "accepted"}
+_REJECT_WORDS = {"false", "no", "reject", "rejected"}
+
+
+def parse_critique_responses(value: Any) -> list[dict[str, Any]]:
+    """Normalize an analyst's response_to_critique into {point, accept, reason}
+    entries. Lenient on purpose: a re-vote is never failed over this field.
+    Free text or a {point: reason} mapping (both seen live) is kept, with
+    accept=None since the model didn't say."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        value = [{"point": k, "reason": v} for k, v in value.items()]
+    if not isinstance(value, list):
+        text = _as_text(value)
+        return [{"point": None, "accept": None, "reason": text}] if text else []
+    responses = []
+    for item in value:
+        if not isinstance(item, dict):
+            text = _as_text(item)
+            if text:
+                responses.append({"point": None, "accept": None, "reason": text})
+            continue
+        accept = item.get("accept")
+        if isinstance(accept, str):
+            word = accept.strip().lower()
+            accept = True if word in _ACCEPT_WORDS else False if word in _REJECT_WORDS else None
+        responses.append({
+            "point": _as_text(item.get("point")),
+            "accept": accept if isinstance(accept, bool) else None,
+            "reason": _as_text(item.get("reason") or item.get("response")),
+        })
+    return responses
 
 
 # --- grounding check (no LLM) ---
@@ -324,15 +365,21 @@ def _find_at_other_index(facts: dict[str, Any], path: str, cited: Any) -> str | 
 
 def check_evidence(evidence: list[dict[str, Any]], facts: dict[str, Any]) -> dict[str, int]:
     """Annotate each item with a status and return counts per status:
-    verified, wrong_index (real value, wrong list position - `found_at`
-    says where), mismatch (the value at that path differs - `actual` says
-    what it is), or unknown_path (the path doesn't exist in the facts)."""
-    counts = {"verified": 0, "wrong_index": 0, "mismatch": 0, "unknown_path": 0}
+    matches_source (the quoted value is what the facts say at that path),
+    wrong_index (real value, wrong list position - `found_at` says where),
+    mismatch (the value at that path differs - `actual` says what it is),
+    or unknown_path (the path doesn't exist in the facts).
+
+    The check confirms quotes, not truth. It was called "verified" until
+    Sept 25, 2026, when a critic read a news item's "verified" status as
+    "confirmed fact" and pushed an analyst toward buy on it (see
+    EVIDENCE_STATUS_NOTE)."""
+    counts = {"matches_source": 0, "wrong_index": 0, "mismatch": 0, "unknown_path": 0}
     for item in evidence:
         path = str(item["fact"])
         actual = resolve_fact_path(facts, path)
         if actual is not _UNRESOLVED and values_match(item["value"], actual):
-            item["status"] = "verified"
+            item["status"] = "matches_source"
         elif (found_at := _find_at_other_index(facts, path, item["value"])) is not None:
             item["status"] = "wrong_index"
             item["found_at"] = found_at
@@ -343,6 +390,10 @@ def check_evidence(evidence: list[dict[str, Any]], facts: dict[str, Any]) -> dic
             item["actual"] = actual
         counts[item["status"]] += 1
     return counts
+
+
+def _pretty(value: Any) -> str:
+    return json.dumps(value, indent=1, ensure_ascii=False, default=str)
 
 
 class AnalystAgent:
@@ -371,76 +422,94 @@ class AnalystAgent:
         if self._trace is not None:
             self._trace.log(self.role, event, payload)
 
-    def analyze(self, ctx: StockContext) -> AnalystVerdict:
-        verdict = AnalystVerdict(
+    def _new_verdict(self, ctx: StockContext, **fields: Any) -> AnalystVerdict:
+        return AnalystVerdict(
             symbol=ctx.symbol,
             role=self.role,
             model=self.model,
             generated_at=self._now().isoformat(),
+            **fields,
         )
+
+    def _complete(
+        self, ctx: StockContext, verdict: AnalystVerdict, messages: list[dict[str, str]]
+    ) -> dict[str, Any] | None:
+        """Ask the model for the verdict JSON and fill `verdict` in place.
+        Returns the raw parsed object, or None with `verdict.error` set."""
+        base = {"symbol": ctx.symbol, "model": self.model, "review_round": verdict.review_round}
+        self._log("llm_request", {**base, "messages": messages})
+        reply = request_json(
+            self._llm,
+            self.model,
+            messages,
+            validate=validate_verdict,
+            log=self._log,
+            base=base,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+            extra_params=self._extra_params,
+            invalid_event="verdict_invalid",
+            repaired_event="verdict_repaired",
+        )
+        if not reply.ok:
+            verdict.error = reply.error if reply.call_failed else f"unparseable verdict: {reply.error}"
+            return None
+        for key, value in reply.value.items():
+            setattr(verdict, key, value)
+        verdict.json_repairs = reply.repairs
+        verdict.evidence_check = check_evidence(verdict.evidence, ctx.facts())
+        return reply.raw
+
+    def analyze(self, ctx: StockContext) -> AnalystVerdict:
+        verdict = self._new_verdict(ctx)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": ctx.to_prompt()},
         ]
-        self._log("llm_request", {"symbol": ctx.symbol, "model": self.model, "messages": messages})
-
-        for attempt in range(1, PARSE_ATTEMPTS + 1):
-            base = {"symbol": ctx.symbol, "model": self.model, "attempt": attempt}
-            try:
-                response = self._llm.chat_completion(
-                    self.model,
-                    messages,
-                    max_tokens=self._max_tokens,
-                    temperature=self._temperature,
-                    **self._extra_params,
-                )
-                choice = response["choices"][0]
-                content = choice["message"].get("content") or ""
-                finish_reason = choice.get("finish_reason")
-            except Exception as exc:  # noqa: BLE001 - a failed analyst means "no pick"
-                verdict.error = f"{type(exc).__name__}: {exc}"
-                self._log("llm_error", {**base, "error": repr(exc)})
-                return verdict
-
-            self._log(
-                "llm_response",
-                {
-                    **base,
-                    "finish_reason": finish_reason,
-                    "content": content,
-                    "reasoning_content": choice["message"].get("reasoning_content"),
-                    "usage": response.get("usage"),
-                },
-            )
-            repairs: list[str] = []
-            try:
-                if not content.strip():
-                    raise ValueError(f"empty reply (finish_reason={finish_reason})")
-                fields = validate_verdict(extract_json_object(content, repairs))
-            except ValueError as exc:
-                verdict.error = f"unparseable verdict: {exc}"
-                self._log("verdict_invalid", {**base, "problem": str(exc)})
-                # One correction turn: show the model its reply and the problem.
-                messages = messages + [
-                    {"role": "assistant", "content": content[-4000:]},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"That reply could not be used: {exc}. Reply again with ONLY "
-                            "the JSON object in the required format."
-                        ),
-                    },
-                ]
-                continue
-
-            if repairs:
-                self._log("verdict_repaired", {**base, "repairs": repairs})
-            for key, value in fields.items():
-                setattr(verdict, key, value)
-            verdict.json_repairs = repairs
-            verdict.evidence_check = check_evidence(verdict.evidence, ctx.facts())
-            verdict.error = None
+        if self._complete(ctx, verdict, messages) is not None:
             self._log("verdict", verdict.to_dict())
-            return verdict
+        return verdict
 
+    def revise(
+        self,
+        ctx: StockContext,
+        own: AnalystVerdict,
+        other: AnalystVerdict,
+        *,
+        assessment: str,
+        challenges_to_me: list[dict[str, Any]],
+        challenges_to_other: list[dict[str, Any]],
+        review_round: int,
+    ) -> AnalystVerdict:
+        """Re-vote after a critic round: same packet, plus both previous
+        verdicts and the critic's challenges. Returns a new verdict (the
+        previous one is left untouched) with previous_recommendation set."""
+        if not (own.ok and other.ok):
+            raise ValueError("revise needs two successful verdicts")
+        verdict = self._new_verdict(
+            ctx, review_round=review_round, previous_recommendation=own.recommendation
+        )
+
+        def listed(challenges: list[dict[str, Any]]) -> str:
+            shown = [{k: v for k, v in c.items() if k != "to"} for c in challenges]
+            return _pretty(shown) if shown else "(none)"
+
+        review = REVISION_PROMPT.format(
+            review_round=review_round,
+            role=self.role,
+            own=_pretty(own.brief()),
+            other=_pretty(other.brief()),
+            assessment=assessment,
+            mine=listed(challenges_to_me),
+            theirs=listed(challenges_to_other),
+            status_note=EVIDENCE_STATUS_NOTE,
+        )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{ctx.to_prompt()}\n\n{review}"},
+        ]
+        raw = self._complete(ctx, verdict, messages)
+        if raw is not None:
+            verdict.response_to_critique = parse_critique_responses(raw.get("response_to_critique"))
+            self._log("verdict", verdict.to_dict())
         return verdict

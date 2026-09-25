@@ -4,11 +4,14 @@
     .venv/Scripts/python -m agents AAPL --no-llm                 # data only, no Build credits
     .venv/Scripts/python -m agents AAPL --analysts analyst_1     # context + one analyst
     .venv/Scripts/python -m agents AAPL --analysts analyst_1 analyst_2
+    .venv/Scripts/python -m agents AAPL --analysts analyst_1 analyst_2 --no-critic
 
 Writes the trace to logs/trace-<UTC date>.jsonl. Without --analysts it
 prints each symbol's analyst-facing context block; with them, a one-line
-verdict per analyst per symbol, plus the cross-check outcome when both
-analyst_1 and analyst_2 ran.
+verdict per analyst per symbol. When both analyst_1 and analyst_2 ran it
+also prints the cross-check outcome and, when that calls for it (a
+buy/hold split or an agreed buy), each critic-loop round and the final
+decision.
 """
 from __future__ import annotations
 
@@ -20,11 +23,13 @@ from data_layer import AlpacaClient, DiskCache, EdgarClient, FinnhubClient, Fred
 from data_layer.llm_client import LlmClient
 
 from .analyst_agent import AnalystAgent, AnalystVerdict
+from .critic_agent import CriticAgent
+from .critic_loop import CriticLoopResult, needs_critic, run_critic_loop
 from .cross_check import cross_check
 from .macro_agent import MacroContextAgent
 from .trace import TraceLogger
 
-CROSS_CHECK_ROLES = {"analyst_1", "analyst_2"}
+CROSS_CHECK_ROLES = ("analyst_1", "analyst_2")
 
 
 def _summary(v: AnalystVerdict) -> str:
@@ -34,10 +39,31 @@ def _summary(v: AnalystVerdict) -> str:
     check = v.evidence_check
     return (
         f"{head}: {v.recommendation.upper()} conf={v.confidence} | evidence "
-        f"{check.get('verified', 0)} verified, {check.get('wrong_index', 0)} wrong index, "
+        f"{check.get('matches_source', 0)} match source, {check.get('wrong_index', 0)} wrong index, "
         f"{check.get('mismatch', 0)} mismatch, {check.get('unknown_path', 0)} unknown path\n"
         f"  {v.thesis}"
     )
+
+
+def _loop_summary(result: CriticLoopResult) -> str:
+    lines = []
+    for r in result.rounds:
+        critique = r["critique"]
+        if critique.get("error"):
+            lines.append(f"  round {r['round']}: critic FAILED - {critique['error']}")
+            continue
+        per_role = {role: sum(1 for c in critique["challenges"] if c["to"] == role) for role in CROSS_CHECK_ROLES}
+        votes = ", ".join(
+            f"{role} {v['previous_recommendation']}->{v['recommendation'] or 'FAILED'}"
+            f" (accepted {v['challenges_accepted']}, rejected {v['challenges_rejected']})"
+            for role, v in r["verdicts"].items()
+        )
+        lines.append(f"  round {r['round']}: critic challenged {per_role}; re-votes: {votes}")
+        lines.append(f"    critic: {critique['assessment']}")
+    head = f"{result.symbol} critic loop ({result.trigger}): {result.outcome.upper()}"
+    if result.recommendation:
+        head += f" ({result.recommendation})"
+    return "\n".join([f"{head} - {result.reason}", *lines])
 
 
 def main() -> None:
@@ -48,6 +74,7 @@ def main() -> None:
         "--analysts", nargs="*", default=[], metavar="ROLE",
         help="analyst roles to run after the context agent, e.g. analyst_1 analyst_2",
     )
+    parser.add_argument("--no-critic", action="store_true", help="stop at the cross-check")
     parser.add_argument("--log-dir", default="logs")
     args = parser.parse_args()
     if args.no_llm and args.analysts:
@@ -67,7 +94,8 @@ def main() -> None:
         llm=llm,
         trace=trace,
     )
-    analysts = [AnalystAgent(llm, role, trace=trace) for role in args.analysts]
+    analysts = {role: AnalystAgent(llm, role, trace=trace) for role in args.analysts}
+    critic = None if args.no_critic else CriticAgent(llm, trace=trace)
 
     for ctx in agent.run(args.symbols).values():
         if not analysts:
@@ -75,14 +103,26 @@ def main() -> None:
             print()
             continue
         verdicts = {}
-        for analyst in analysts:
-            verdicts[analyst.role] = analyst.analyze(ctx)
-            print(_summary(verdicts[analyst.role]), flush=True)
-        if CROSS_CHECK_ROLES <= verdicts.keys():
-            result = cross_check(*(verdicts[r] for r in sorted(CROSS_CHECK_ROLES)), trace=trace)
-            print(f"{ctx.symbol} cross-check: {result.outcome.upper()}"
-                  f"{f' ({result.recommendation})' if result.recommendation else ''} - {result.reason}",
-                  flush=True)
+        for role, analyst in analysts.items():
+            verdicts[role] = analyst.analyze(ctx)
+            print(_summary(verdicts[role]), flush=True)
+        if not set(CROSS_CHECK_ROLES) <= verdicts.keys():
+            continue
+        result = cross_check(*(verdicts[r] for r in CROSS_CHECK_ROLES), trace=trace)
+        print(f"{ctx.symbol} cross-check: {result.outcome.upper()}"
+              f"{f' ({result.recommendation})' if result.recommendation else ''} - {result.reason}",
+              flush=True)
+        trigger = needs_critic(result)
+        if critic is not None and trigger is not None:
+            loop = run_critic_loop(
+                ctx,
+                {r: verdicts[r] for r in CROSS_CHECK_ROLES},
+                {r: analysts[r] for r in CROSS_CHECK_ROLES},
+                critic,
+                trigger,
+                trace=trace,
+            )
+            print(_loop_summary(loop), flush=True)
     print(f"trace: {trace.path}")
 
 

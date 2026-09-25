@@ -16,7 +16,7 @@ def _v(role, rec, model=None, confidence=0.7, error=None, symbol="AAPL"):
         recommendation=None if error else rec,
         confidence=None if error else confidence,
         thesis=None if error else "t",
-        evidence_check={} if error else {"verified": 3},
+        evidence_check={} if error else {"matches_source": 3},
         error=error,
     )
 
