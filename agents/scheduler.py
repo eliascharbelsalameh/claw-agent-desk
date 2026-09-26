@@ -197,7 +197,7 @@ class DeskScheduler:
         if run.deferred:
             item = self.state.pending.get(run.symbol) or {"session": session, "first_deferred": now, "attempts": 0}
             item.update(run=run.to_dict(), attempts=item["attempts"] + 1, last_attempt=now,
-                        reason=(run.critic_loop or run.cross_check).reason)
+                        reason=run.deferred_reason)
             self.state.pending[run.symbol] = item
             return None
         self.state.pending.pop(run.symbol, None)

@@ -19,7 +19,9 @@ model (or every critic candidate) can't be reached, the stock comes out
 up at the failed step - the scheduler does that on its next cycle. Each
 analyst answers on its own primary model; its backups are allowed only after
 the primary has been down for ANALYST_BACKUP_AFTER (tracked in
-ModelOutages, which the scheduler keeps across cycles).
+ModelOutages, which the scheduler keeps across cycles). At the bias gate,
+once bias_2 has been unreachable on a stock for BIAS_SOLO_AFTER, bias_1
+decides alone (bias_agent.py).
 
 Nothing here decides anything itself - it only sequences the agents and
 passes each one what the previous stage produced.
@@ -38,7 +40,7 @@ from data_layer.config import Settings
 from data_layer.llm_client import LlmClient
 
 from .analyst_agent import AnalystAgent, AnalystVerdict
-from .bias_agent import BIAS_ROLES, BiasAgent, BiasGateResult, bias_gate
+from .bias_agent import BIAS_ROLES, BIAS_SOLO_AFTER, BiasAgent, BiasGateResult, bias_gate
 from .bias_agent import DEFERRED as BIAS_DEFERRED
 from .critic_agent import CriticAgent, Critique
 from .critic_loop import CHALLENGE_AGREED_BUYS, MAX_ROUNDS, CriticLoopResult, needs_critic, run_critic_loop
@@ -130,6 +132,17 @@ class SymbolRun:
                 or (self.bias is not None and self.bias.outcome == BIAS_DEFERRED)
                 or (self.technical is not None and self.technical.outcome == TECHNICAL_DEFERRED))
 
+    @property
+    def deferred_reason(self) -> str | None:
+        """Why a deferred run waits: the deferred stage's own reason."""
+        if self.outcome == DEFERRED:
+            return (self.critic_loop or self.cross_check).reason
+        if self.bias is not None and self.bias.outcome == BIAS_DEFERRED:
+            return self.bias.reason
+        if self.technical is not None and self.technical.outcome == TECHNICAL_DEFERRED:
+            return self.technical.error or self.technical.reason
+        return None
+
     def final_verdicts(self) -> dict[str, AnalystVerdict]:
         """The verdicts the decision rests on: the critic loop's last ones
         if it ran, else the first ones."""
@@ -179,6 +192,7 @@ class DeskPipeline:
         max_rounds: int = MAX_ROUNDS,
         outages: ModelOutages | None = None,
         backup_after: timedelta = ANALYST_BACKUP_AFTER,
+        bias_solo_after: timedelta | None = BIAS_SOLO_AFTER,
         now: Callable[[], datetime] = _utcnow,
     ):
         self.macro = macro
@@ -191,6 +205,7 @@ class DeskPipeline:
         self.max_rounds = max_rounds
         self.outages = outages if outages is not None else ModelOutages()
         self.backup_after = backup_after
+        self.bias_solo_after = bias_solo_after
         self._now = now
 
     @classmethod
@@ -306,8 +321,8 @@ class DeskPipeline:
         """The bias gate, for an agreed buy only (the one outcome that opens
         a position)."""
         if self.bias_agents and run.outcome == AGREE and run.recommendation == "buy":
-            run.bias = bias_gate(run.context, run.final_verdicts(), self.bias_agents,
-                                 previous=previous, trace=self.trace)
+            run.bias = bias_gate(run.context, run.final_verdicts(), self.bias_agents, previous=previous,
+                                 trace=self.trace, solo_after=self.bias_solo_after, now=self._now)
             emit("bias", run.symbol, run.bias)
         return self._technical(run, emit)
 

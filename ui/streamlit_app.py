@@ -241,7 +241,7 @@ def summary_rows(runs: list[SymbolRun]) -> list[dict]:
         row["critic loop"] = (f"{run.critic_loop.outcome} after {len(run.critic_loop.rounds)} round(s)"
                               if run.critic_loop else "")
         row["final"] = (f"{run.outcome} {run.recommendation or ''}".strip() if run.outcome else "data only")
-        row["bias gate"] = run.bias.outcome if run.bias else ""
+        row["bias gate"] = (run.bias.outcome + (" (bias_1 alone)" if run.bias.solo else "")) if run.bias else ""
         row["entry"] = (run.technical.timing or run.technical.outcome) if run.technical else ""
         row["data gaps"] = len(run.context.data_gaps)
         rows.append(row)

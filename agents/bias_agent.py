@@ -15,6 +15,14 @@ single flag is kept in the decision's record. An agent that can't be
 reached defers the stock (retried like any Build failure); an unusable
 answer fails the gate, because a check that couldn't be done is not a pass.
 
+Decided Sept 26, 2026: once bias_2 has been unreachable on a stock for
+BIAS_SOLO_AFTER - every attempt for that stock failed since - bias_1
+decides alone: its pass lets the buy through and its flag vetoes it (so
+here a single flag is enough). In the Sept 26 dry run four agreed buys
+waited all afternoon on bias_2, whose only eligible model (mistral-nemotron)
+failed 61% of its calls that day. It only works this way round: an
+unreachable bias_1 still defers the stock.
+
 Runtime independence: each bias agent excludes the models the analysts
 actually used, and bias_2 also excludes the model bias_1 ran on.
 """
@@ -23,7 +31,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
@@ -39,6 +47,11 @@ BIAS_TEMPERATURE = 0.0
 CHECKS = ("news_driven", "stale_news", "trend_chasing")
 
 PASSED, VETOED, FAILED, DEFERRED = "passed", "vetoed", "failed", "deferred"
+
+# The agent that may decide alone, and after how long the other one's
+# outage on a stock (see the module docstring).
+SOLO_ROLE = "bias_1"
+BIAS_SOLO_AFTER = timedelta(hours=2)
 
 SYSTEM_PROMPT = f"""You are a bias and sentiment checker on an equity research desk. Two analysts, on different models, independently read the same context packet for one US stock and both recommend buying it for a long-only portfolio of real shares over {HORIZON}; a critic has already challenged their reasoning. Your job is narrower: check whether this buy rests on skewed inputs rather than on the evidence. You do not decide whether to buy and you give no recommendation.
 
@@ -203,6 +216,11 @@ class BiasGateResult:
     outcome: str  # PASSED, VETOED, FAILED or DEFERRED
     reason: str
     checks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Role -> when this stock's first attempt to reach it failed (UTC, ISO),
+    # kept while every retry fails: what BIAS_SOLO_AFTER is measured from.
+    unreachable_since: dict[str, str] = field(default_factory=dict)
+    # SOLO_ROLE decided alone (the other agent unreachable for BIAS_SOLO_AFTER).
+    solo: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -213,6 +231,11 @@ class BiasGateResult:
         return {"gate": "bias", "passed": self.outcome == PASSED, "reason": self.reason}
 
 
+def _duration(delta: timedelta) -> str:
+    minutes = int(delta.total_seconds() // 60)
+    return f"{minutes // 60}h {minutes % 60:02d}m"
+
+
 def bias_gate(
     ctx: StockContext,
     verdicts: dict[str, AnalystVerdict],
@@ -220,11 +243,13 @@ def bias_gate(
     *,
     previous: BiasGateResult | None = None,
     trace: TraceLogger | None = None,
+    solo_after: timedelta | None = BIAS_SOLO_AFTER,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> BiasGateResult:
     """Run the bias agents in role order (each after the previous, so it
     can exclude the model that one used). With `previous` - a deferred
     result - checks that already came back are kept and only the others
-    are asked again."""
+    are asked again. solo_after=None never lets SOLO_ROLE decide alone."""
     kept = {role: BiasCheck(**d) for role, d in (previous.checks if previous else {}).items()
             if d.get("error") is None}
     checks: dict[str, BiasCheck] = {}
@@ -239,10 +264,30 @@ def bias_gate(
     unusable = [r for r, c in checks.items() if not c.ok and not c.call_failed]
     unreached = [r for r, c in checks.items() if not c.ok and c.call_failed]
     flags = [r for r, c in checks.items() if c.ok and c.flagged]
+    at = now()
+    earlier = previous.unreachable_since if previous else {}
+    since = {r: earlier.get(r) or at.isoformat() for r in unreached}
+    # SOLO_ROLE's check stands alone only when it came back and every other
+    # agent is unreachable, counted from the latest of their first failures.
+    solo_check = checks.get(SOLO_ROLE)
+    alone = (solo_after is not None and solo_check is not None and solo_check.ok
+             and bool(unreached) and len(unreached) == len(checks) - 1)
+    start = max((datetime.fromisoformat(s) for s in since.values()), default=at)
+    solo = alone and at - start >= solo_after
+    absent = ", ".join(unreached)
     if unusable:
         outcome, reason = FAILED, f"bias check unusable from {', '.join(unusable)}; a check that couldn't be done is not a pass"
+    elif solo:
+        why = (f"{absent} could not be reached for {_duration(at - start)} (since {start:%H:%M} UTC), "
+               f"so {SOLO_ROLE} decides alone")
+        if solo_check.flagged:
+            outcome, reason = VETOED, f"{why} and flags the buy: {solo_check.reason}"
+        else:
+            outcome, reason = PASSED, f"passed: {why} and passes it"
     elif unreached:
-        outcome, reason = DEFERRED, f"could not reach {', '.join(unreached)}: a Build failure, retried next pass"
+        outcome, reason = DEFERRED, f"could not reach {absent}: a Build failure, retried next pass"
+        if alone:
+            reason += f"; {SOLO_ROLE} decides alone if {absent} is still unreachable at {start + solo_after:%H:%M} UTC"
     elif len(flags) == len(checks):
         outcome = VETOED
         reason = "both bias agents flag the buy: " + " | ".join(f"{r}: {checks[r].reason}" for r in flags)
@@ -252,9 +297,10 @@ def bias_gate(
                   "a veto needs both bias agents")
     else:
         outcome, reason = PASSED, "passed: neither bias agent flags the buy"
-    result = BiasGateResult(symbol=ctx.symbol, outcome=outcome, reason=reason, checks=records)
+    result = BiasGateResult(symbol=ctx.symbol, outcome=outcome, reason=reason, checks=records,
+                            unreachable_since=since, solo=solo)
     if trace is not None:
         trace.log("bias_gate", "decision", {"symbol": ctx.symbol, "outcome": outcome, "reason": reason,
                                              "sentiment": {r: c.news_sentiment for r, c in checks.items()},
-                                             "flags": flags})
+                                             "flags": flags, "unreachable_since": since, "solo": solo})
     return result

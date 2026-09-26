@@ -1,10 +1,12 @@
 """Bias/sentiment agents and the bias gate (spec section 3, step 4)."""
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from agents.analyst_agent import AnalystVerdict
 from agents.bias_agent import (
+    BIAS_SOLO_AFTER,
     DEFERRED,
     FAILED,
     PASSED,
@@ -97,9 +99,13 @@ class ScriptedBias:
         return check
 
 
-def _gate(r1, r2, previous=None, agents=None):
+T0 = datetime(2026, 9, 28, 12, 30, tzinfo=timezone.utc)
+
+
+def _gate(r1, r2, previous=None, agents=None, at=T0, solo_after=BIAS_SOLO_AFTER):
     agents = agents or {"bias_1": ScriptedBias("bias_1", r1), "bias_2": ScriptedBias("bias_2", r2)}
-    return bias_gate(_ctx(), _verdicts(), agents, previous=previous), agents
+    result = bias_gate(_ctx(), _verdicts(), agents, previous=previous, solo_after=solo_after, now=lambda: at)
+    return result, agents
 
 
 @pytest.mark.parametrize("r1, r2, outcome", [
@@ -132,6 +138,56 @@ def test_deferred_gate_resumes_keeping_the_check_that_came_back():
     second, _ = _gate(None, None, previous=first, agents=agents)
     assert second.outcome == VETOED
     assert len(agents["bias_2"].results) == 0 and agents["bias_2"].excludes == [set()]  # asked once only
+
+
+# --- bias_1 alone after a long bias_2 outage (decided Sept 26, 2026) ---
+
+@pytest.mark.parametrize("r1, outcome", [("pass", PASSED), ("flag", VETOED)])
+def test_bias_1_decides_alone_once_bias_2_has_been_unreachable_long_enough(r1, outcome):
+    first, agents = _gate([r1], ["DOWN", "DOWN", "DOWN"])
+    assert first.outcome == DEFERRED and not first.solo
+    assert first.unreachable_since == {"bias_2": T0.isoformat()}
+    assert "bias_1 decides alone if bias_2 is still unreachable at 14:30 UTC" in first.reason
+
+    # a retry just short of BIAS_SOLO_AFTER still waits, and the wait keeps its start
+    almost = T0 + BIAS_SOLO_AFTER - timedelta(minutes=1)
+    second, _ = _gate(None, None, previous=first, agents=agents, at=almost)
+    assert second.outcome == DEFERRED and second.unreachable_since == first.unreachable_since
+
+    third, _ = _gate(None, None, previous=second, agents=agents, at=T0 + BIAS_SOLO_AFTER)
+    assert third.outcome == outcome and third.solo and third.gate["passed"] is (outcome == PASSED)
+    assert "bias_2 could not be reached for 2h 00m (since 12:30 UTC), so bias_1 decides alone" in third.reason
+    assert agents["bias_1"].excludes == [set()]  # asked once: its check was kept
+    assert agents["bias_2"].results == []        # asked on every pass
+
+
+def test_alone_a_single_flag_vetoes_which_it_never_does_with_both_agents():
+    both, _ = _gate(["flag"], ["pass"])
+    assert both.outcome == PASSED
+    first, agents = _gate(["flag"], ["DOWN", "DOWN"])
+    alone, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=3))
+    assert alone.outcome == VETOED and "flags the buy: bias_1 says flag" in alone.reason
+
+
+def test_bias_2_answering_late_brings_back_the_two_agent_rule():
+    first, agents = _gate(["flag"], ["DOWN", "pass"])
+    late, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=3))
+    assert late.outcome == PASSED and not late.solo and late.unreachable_since == {}
+    assert "a veto needs both bias agents" in late.reason
+
+
+def test_bias_2_never_decides_alone():
+    first, agents = _gate(["DOWN", "DOWN"], ["flag"])
+    assert first.outcome == DEFERRED and "decides alone" not in first.reason
+    later, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=5))
+    assert later.outcome == DEFERRED and not later.solo
+    assert later.unreachable_since == {"bias_1": T0.isoformat()}
+
+
+def test_solo_rule_off_keeps_waiting():
+    first, agents = _gate(["pass"], ["DOWN", "DOWN"], solo_after=None)
+    later, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=5), solo_after=None)
+    assert later.outcome == DEFERRED and not later.solo and "decides alone" not in later.reason
 
 
 def test_pipeline_runs_the_gate_only_on_agreed_buys_and_decisions_carry_it():
