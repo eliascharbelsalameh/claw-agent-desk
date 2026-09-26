@@ -131,3 +131,10 @@ def test_backups_only_after_the_primary_has_been_down_long_enough():
     assert desk.allow_backup("analyst_1")
     analyst.models = ["lab-analyst_1/m"]  # no backup configured: always defer
     assert not desk.allow_backup("analyst_1")
+
+
+def test_parallel_run_matches_the_sequential_one_in_input_order():
+    sequential = _pipeline().run(["AAPL", "MSFT", "NVDA"])
+    parallel = _pipeline().run(["AAPL", "MSFT", "NVDA"], workers=3)
+    assert [r.symbol for r in parallel] == ["AAPL", "MSFT", "NVDA"]
+    assert [(r.outcome, r.recommendation) for r in parallel] == [(r.outcome, r.recommendation) for r in sequential]

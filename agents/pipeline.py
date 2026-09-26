@@ -26,6 +26,7 @@ passes each one what the previous stage produced.
 """
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -68,12 +69,14 @@ class ModelOutages:
     keep it across cycles and restarts."""
 
     down_since: dict[str, str] = field(default_factory=dict)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def record(self, model: str, ok: bool, now: datetime) -> None:
-        if ok:
-            self.down_since.pop(model, None)
-        else:
-            self.down_since.setdefault(model, now.isoformat())
+        with self._lock:
+            if ok:
+                self.down_since.pop(model, None)
+            else:
+                self.down_since.setdefault(model, now.isoformat())
 
     def down_for(self, model: str, now: datetime) -> timedelta | None:
         since = self.down_since.get(model)
@@ -229,17 +232,27 @@ class DeskPipeline:
                    trace=trace, challenge_agreed_buys=challenge_agreed_buys, max_rounds=max_rounds,
                    outages=outages)
 
-    def run(self, symbols: list[str], on_event: EventCallback | None = None) -> list[SymbolRun]:
+    def run(self, symbols: list[str], on_event: EventCallback | None = None, workers: int = 1) -> list[SymbolRun]:
+        """One SymbolRun per symbol, in the order given. With workers > 1
+        several stocks go through the desk at once - the scheduler does this
+        so a full watchlist finishes before the open (Sept 26, 2026: 3 stocks
+        took 41 minutes one after another on a slow Build morning). Events
+        then come from worker threads, so interactive callers (the app) keep
+        the default of 1."""
         emit = on_event or (lambda stage, symbol, payload: None)
         shared = self.macro.prepare()
-        runs = []
-        for symbol in symbols:
+
+        def one(symbol: str) -> SymbolRun:
             ctx = self.macro.build_context(symbol, shared)
             emit("context", ctx.symbol, ctx)
             run = self.run_symbol(ctx, emit)
             emit("done", ctx.symbol, run)
-            runs.append(run)
-        return runs
+            return run
+
+        if workers <= 1:
+            return [one(symbol) for symbol in symbols]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(one, symbols))
 
     def allow_backup(self, role: str) -> bool:
         """Whether `role` may answer on a backup: only once its primary has

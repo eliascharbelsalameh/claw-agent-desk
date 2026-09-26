@@ -46,6 +46,14 @@ Pipeline:
 
 Every agent's input and output is logged with a timestamp, so the demo video can show the back-and-forth and not just a final buy or hold.
 
+**As built (Sept 26, 2026)** — all six steps exist (`agents/`), run by `agents/pipeline.py` and, unattended, by `agents/scheduler.py`:
+- Step 1 also computes trailing valuation (from SEC filings), technicals vs SPY and the earnings calendar (`computed_facts.py`).
+- Step 2: the two analysts use one symmetric bar ("buy and avoid take the same bar"), run in parallel, and never fail over to a backup model — a Build failure *defers* the stock, which is retried from the failed step on the next pass.
+- Step 3: the critic loop runs on buy/hold splits and on agreed buys, and is resumable after a deferral.
+- Step 4: the bias gate runs on agreed buys; **a veto needs both bias agents to flag** the buy (a single flag is recorded), mirroring the strict two-analyst match.
+- Step 5: the technical agent only times the entry of a buy that passed the bias gate: *enter* at the next open, or *wait* for a specific chart reason (re-examined the next day). It can't create a buy.
+- Step 6 (`portfolio.py`): only an agreed, ungated buy opens a paper position (10% of equity, whole shares, at most 8 positions, no margin); a position is sold on an agreed avoid or after its 5-session horizon (a fresh agreed buy restarts it); positions the desk didn't open are never touched; orders carry decision-derived ids so they can't be placed twice.
+
 ## 4. Models and rate limits
 
 Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-compatible). Implemented in `data_layer/llm_client.py`.
@@ -61,7 +69,7 @@ Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-co
   | bias 1 | `meta/muse-glimmer-30b` | moved off `google/gemma-4-31b-it` on Sept 25 (gemma is analyst 1, so it would have checked its own analysis). The only reliable model independent of both analysts; shares a model with the critic. Backup: mistral-nemotron |
   | bias 2 | `mistralai/mistral-nemotron` | fast, non-reasoning; 2/2 on the large-prompt screen (13–22s), deterministic at temperature 0, sound but shallower review than muse-glimmer and cites no fact paths. **Lineage partly shared with analyst 2's Nemotron line**: NVIDIA describes it as "produced by Mistral and optimised by NVIDIA" without saying whether Nemotron data or recipes were used, and Mistral co-develops the Nemotron 4 base model (Nemotron Coalition, 2026) |
   | technical | `nvidia/nemotron-3-super-120b-a12b` | moved off `moonshotai/kimi-k3` on Sept 25: kimi answered 0 of 7 calls that day, including a one-line prompt cut off at the 60s gateway limit (glm-5.3 and deepseek-v4.1-flash the same). nemotron-3-super is reliable and a reasoning model; it shares analyst 2's model, which matters less for entry timing than for judging the pick. Backups: mistral-nemotron, gemma |
-- **Per-role backups (Sept 25):** every role has ordered backup models (`AGENT_MODEL_BACKUPS`), a model that just failed is tried last for 15 minutes, and agents exclude any model that would break independence for that call (the other analyst's, the analysts' for the critic). Verified live against dead and 404 endpoints. A wide test (8 frozen large caps, Sept 26) showed muse-glimmer as analyst 1's backup tells bullish from bearish (hold vs avoid) and matched gemma on 6 of 8; it never says buy, but nemotron (analyst 2) held on every stock too, so the desk's decisions were the same either way. Open question for the demo: the desk rarely buys (see CLAUDE.md).
+- **Per-role backups (Sept 25):** every role has ordered backup models (`AGENT_MODEL_BACKUPS`), a model that just failed is tried last for 15 minutes, and agents exclude any model that would break independence for that call (the other analyst's, the analysts' for the critic). Verified live against dead and 404 endpoints. **Changed Sept 26: the analysts have no backups.** On 11 frozen contexts muse-glimmer said buy 0 times (0 of 34 across all tests) and mistral-nemotron 6 of 9 (vs nemotron-3-super's 2 of 11), so a failover would silently change the decision; an unreachable analyst now defers the stock instead. A wide test (8 frozen large caps, Sept 26) showed muse-glimmer as analyst 1's backup tells bullish from bearish (hold vs avoid) and matched gemma on 6 of 8; it never says buy, but nemotron (analyst 2) held on every stock too, so the desk's decisions were the same either way. Open question for the demo: the desk rarely buys (see CLAUDE.md).
 - **Several of these are reasoning models** (hidden chain-of-thought before visible content) — they need a generous `max_tokens` or they hit `finish_reason: "length"` with empty `content`, and `llm_client.py`'s `DEFAULT_TIMEOUT` is 120s (not the 15s used elsewhere in the data layer) because of how slow `gpt-oss-20b` in particular was.
 - **Gateway 60s idle cutoff (found Sept 25, 2026):** Build closes any connection that sends no bytes for 60s, so non-streaming calls to reasoning models fail at exactly 60s. `llm_client.py` now streams by default. Streams also drop mid-response under load, and output from a degraded backend can turn into degenerate text, so agents retry and validate what they forward.
 - **Thinking can be switched off on Nemotron models** via `chat_template_kwargs={"enable_thinking": false}`. The macro/context role uses it: with thinking on, the macro model spent its full 4,096-token budget reasoning (inside `content`) without producing a briefing; with it off, the same prompt returned a complete briefing in ~20–40s.
@@ -108,7 +116,7 @@ Rules for the agents:
 ## 7. Demo plan
 
 - Portfolio of at least three US stocks (an idea, not a hard constraint).
-- Runs about 2 days continuously on the Oracle A1 instance (via Termius).
+- Runs about 2 days continuously on the Oracle A1 instance (via Termius) — `python -m agents.scheduler --paper-orders` as a systemd user service (`deploy/`): one decision cycle per trading day at 08:00 ET (orders queue for the open) plus retry passes for deferred stocks every 30 minutes until 15:00 ET.
 - The video shows timestamped decisions, agent disagreement and agreement, and at least one aborted decision.
 - Video length: 60 to 90 seconds.
 - Add a note that this is a research demo (simulated or paper trading), not financial advice.
@@ -134,8 +142,8 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 - **Decided (Sept 25):** positions are long-only in real shares — no shorting, derivatives, leverage or negotiated deals.
 - **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). No confidence floor: tested and dropped, since the two models report confidence on different scales. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once. Implemented in `agents/cross_check.py`; hold vs avoid (not explicitly decided) aborts under strict matching, which only matters for a stock already held.
 - **Decided (Sept 25):** analyst horizon is the next 2–5 trading days, a forward projection judged only from data available now, so the ~2-day paper run can test the calls on camera.
-- Should decisions be executed on the Alpaca paper account, or only logged?
-- Final list of the three stocks?
+- ~~Should decisions be executed on the Alpaca paper account, or only logged?~~ **Decided Sept 26:** executed on the paper account by the deployed scheduler (`--paper-orders`); everything else (CLI, app, `--once`) is log-only.
+- ~~Final list of the three stocks?~~ The scheduler's default watchlist is the 11 liquid large caps the desk was tested on (AAPL MSFT NVDA AMD META INTC CVX NFLX NKE MRK ADBE); the desk rarely agrees on a buy, so a wider list gives the demo a better chance of showing trades.
 - Is FT content usable programmatically, and is Barron's worth buying?
 - Demo output: per-stock reasoning trail, multi-day log, or both?
 - How Build credits get consumed over a multi-day run.

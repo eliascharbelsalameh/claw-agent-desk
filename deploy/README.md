@@ -58,7 +58,7 @@ journalctl --user -u claw-desk-scheduler -f
 The unit runs with `--paper-orders`, so its orders go to the Alpaca **paper** account (the URL in
 `.env` is `paper-api.alpaca.markets`). Drop the flag in the unit for log-only.
 
-The scheduler wakes every minute. It runs the day's decision cycle at 09:00 ET, before the open,
+The scheduler wakes every minute. It runs the day's decision cycle at 08:00 ET, before the open,
 and retries deferred stocks every 30 minutes until 15:00 ET. It follows Alpaca's market clock, so
 weekends and holidays are skipped whatever the server's time zone is. Restarts are safe: the state
 file records what was already decided, and order ids are derived from the decision, so an order is

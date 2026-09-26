@@ -185,21 +185,24 @@ class LlmClient:
         self._session = session or requests.Session()
         self._rpm_limits = rpm_limits or {}
         self._call_times: dict[str, deque[float]] = defaultdict(deque)
+        # The pipeline calls from several threads (both analysts at once, and
+        # several stocks at once in the scheduler): one lock per client keeps
+        # the per-model windows consistent. Waiting happens outside it.
+        self._rate_lock = threading.Lock()
 
     def _wait_for_rate_limit(self, model: str) -> None:
         limit = self._rpm_limits.get(model, DEFAULT_RPM_LIMIT)
-        window = self._call_times[model]
-        now = time.monotonic()
-        while window and now - window[0] > 60.0:
-            window.popleft()
-        if len(window) >= limit:
-            sleep_for = 60.0 - (now - window[0])
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            now = time.monotonic()
-            while window and now - window[0] > 60.0:
-                window.popleft()
-        window.append(time.monotonic())
+        while True:
+            with self._rate_lock:
+                window = self._call_times[model]
+                now = time.monotonic()
+                while window and now - window[0] >= 60.0:  # a call 60 s old is out of the window
+                    window.popleft()
+                if len(window) < limit:
+                    window.append(now)
+                    return
+                sleep_for = 60.0 - (now - window[0])
+            time.sleep(max(sleep_for, 0.01))
 
     def chat_completion(
         self,

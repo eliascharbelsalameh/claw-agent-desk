@@ -14,8 +14,8 @@ def _clock(ts, is_open=False, next_open="2026-09-28T09:30:00-04:00"):
     return {"timestamp": ts, "is_open": is_open, "next_open": next_open, "next_close": "2026-09-28T16:00:00-04:00"}
 
 
-PRE_MARKET = _clock("2026-09-28T09:05:00-04:00")
-EARLY = _clock("2026-09-28T08:30:00-04:00")
+PRE_MARKET = _clock("2026-09-28T08:05:00-04:00")
+EARLY = _clock("2026-09-28T07:30:00-04:00")
 MIDDAY = _clock("2026-09-28T11:00:00-04:00", is_open=True, next_open="2026-09-29T09:30:00-04:00")
 AFTER_CLOSE = _clock("2026-09-28T17:00:00-04:00", next_open="2026-09-29T09:30:00-04:00")
 WEEKEND = _clock("2026-09-26T10:00:00-04:00", next_open="2026-09-28T09:30:00-04:00")
@@ -66,7 +66,7 @@ def _scheduler(tmp_path, broker, clock_box, watchlist=("AAPL", "MSFT", "NVDA"), 
                          now=lambda: clock_box["now"])
 
 
-T0 = datetime(2026, 9, 28, 13, 5, tzinfo=timezone.utc)
+T0 = datetime(2026, 9, 28, 12, 5, tzinfo=timezone.utc)
 
 
 def test_a_trading_day(tmp_path):

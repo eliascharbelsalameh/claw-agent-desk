@@ -6,7 +6,7 @@ section 7: about two days of continuous running on the Oracle A1 box).
     python -m agents.scheduler --once decision # one decision cycle now, then exit
 
 Every trading day (Alpaca's market clock decides what one is):
-- one decision cycle at DECISION_TIME_ET, before the open: every watchlist
+- one decision cycle at DECISION_TIME_ET (08:00), before the open: every watchlist
   stock, plus every stock the desk holds, gets a fresh context and the full
   desk; final decisions go to the portfolio step, whose orders queue for
   the open. Before the open the latest daily bar is a finished session, so
@@ -39,10 +39,15 @@ AGENT_NAME = "scheduler"
 
 # Liquid large caps across sectors: the stocks the desk was tested on.
 DEFAULT_WATCHLIST = ("AAPL", "MSFT", "NVDA", "AMD", "META", "INTC", "CVX", "NFLX", "NKE", "MRK", "ADBE")
-DECISION_TIME_ET = time(9, 0)
+# 90 minutes before the open: a full watchlist cycle took up to an hour on a
+# slow Build day (Sept 2026), and orders sent before 09:30 queue for the open.
+DECISION_TIME_ET = time(8, 0)
 RETRY_EVERY = timedelta(minutes=30)
 RETRY_UNTIL_ET = time(15, 0)
 POLL_SECONDS = 60
+# Stocks going through the desk at once in a decision cycle. Build's
+# ceiling is 40 requests/minute per model; three stocks keep well under it.
+WORKERS = 3
 
 DECISION, RETRY, IDLE = "decision", "retry", "idle"
 
@@ -66,9 +71,11 @@ class DeskScheduler:
         log_dir: str | Path = "logs",
         watchlist: tuple[str, ...] = DEFAULT_WATCHLIST,
         dry_run: bool = True,
+        workers: int = WORKERS,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         self._broker = broker
+        self.workers = workers
         self._make_pipeline = pipeline_factory
         self.state_path = Path(state_path)
         self.log_dir = Path(log_dir)
@@ -76,7 +83,7 @@ class DeskScheduler:
         self.dry_run = dry_run
         self._now = now
         self.state = DeskState.load(self.state_path)
-        # When the last pass (decision or retry) started: a retry waits
+        # When the last pass (decision or retry) ended: a retry waits
         # RETRY_EVERY after it, so a Build outage has time to clear.
         self._last_pass: datetime | None = None
 
@@ -129,7 +136,6 @@ class DeskScheduler:
         """Fresh contexts and the full desk for the watchlist and every stock
         the desk holds; deferred stocks go to `pending` for the retry passes."""
         started = self._now()
-        self._last_pass = started
         trace = self._trace()
         pipeline = self._pipeline(trace)
         expired = self._expire_pending(session)
@@ -137,11 +143,11 @@ class DeskScheduler:
         trace.log(AGENT_NAME, "cycle_start", {"kind": DECISION, "session": session, "symbols": symbols,
                                               "expired_pending": expired})
         decisions = []
-        for run in pipeline.run(symbols):
+        for run in pipeline.run(symbols, workers=self.workers):
             decision = self._settle(run, session)
             if decision is not None:
                 decisions.append(decision)
-            self._save(pipeline)
+        self._save(pipeline)
         orders = self._act(decisions, session, trace, check_horizons=True)
         self.state.last_decision_session = session
         return self._finish(DECISION, session, started, trace, pipeline, decisions, orders)
@@ -149,7 +155,6 @@ class DeskScheduler:
     def retry_pass(self, session: str) -> dict[str, Any]:
         """Resume every deferred stock of this session from its failed step."""
         started = self._now()
-        self._last_pass = started
         trace = self._trace()
         pipeline = self._pipeline(trace)
         expired = self._expire_pending(session)
@@ -215,6 +220,7 @@ class DeskScheduler:
         self.state.cycles.append(summary)
         trace.log(AGENT_NAME, "cycle_end", summary)
         self._save(pipeline)
+        self._last_pass = self._now()
         return summary
 
 
@@ -225,6 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--paper-orders", action="store_true",
                         help="send the orders to the Alpaca paper account (default: log only)")
+    parser.add_argument("--workers", type=int, default=WORKERS, help="stocks processed at once")
     parser.add_argument("--once", choices=(DECISION, RETRY),
                         help="run one decision cycle or retry pass now for the current session, then exit")
     args = parser.parse_args(argv)
@@ -236,7 +243,7 @@ def main(argv: list[str] | None = None) -> int:
 
     scheduler = DeskScheduler(broker=broker, pipeline_factory=factory, state_path=args.state,
                               log_dir=args.log_dir, watchlist=tuple(args.watchlist),
-                              dry_run=not args.paper_orders)
+                              dry_run=not args.paper_orders, workers=args.workers)
     if args.once:
         session = session_for(broker.get_clock())
         run = scheduler.decision_cycle if args.once == DECISION else scheduler.retry_pass
