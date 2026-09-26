@@ -77,7 +77,7 @@ Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-co
 - **Credits:** ~~trial accounts get ~1,000 inference credits on signup, up to ~5,000~~ — not confirmed. On Sept 26, 2026, build.nvidia.com showed this account only the 40 RPM rate limit, with no credit balance anywhere, and the API returns no credit information. Treat RPM (and Build's reliability) as the only limits; quota refusals, if they ever come, show up as call failures (deferrals) in the trace.
 - **Estimated load:** a few dozen LLM calls per stock cycle, well under 40 RPM unless loops get chatty.
 - **Must have:** retry with backoff on HTTP 429 in every LLM call — done, `llm_client.py` calls go through the same `http_utils.request_with_retry` as every other data-layer client.
-- **Measured usage (Sept 26):** a live decision cycle used ~5 LLM calls and ~61k tokens per stock (context briefing, both analysts, a critic round, the bias gate); a full 11-stock day is about 45–60 calls.
+- **Measured usage (Sept 26):** the 22-stock decision cycle took 55 minutes, 112 LLM calls and ~1.34M tokens (~61k tokens per stock: context briefing, both analysts, critic rounds, bias gate); a retry pass a few calls more.
 - **Self-hosting:** not realistic on Oracle A1 (no GPU), so the endpoints are the route.
 
 ## 5. Data sources (US stocks only)

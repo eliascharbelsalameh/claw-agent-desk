@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,15 @@ class DiskCache:
         return payload["value"]
 
     def set(self, key: str, value: Any, ttl_seconds: float) -> None:
+        """Best effort: written to a temp file then renamed, so a reader never
+        sees half an entry, and a failed write (another thread replacing the
+        same entry on Windows, a full disk) never fails the request whose
+        result it was caching - the scheduler fetches several stocks at once."""
         path = self._path(key)
         payload = {"expires_at": time.time() + ttl_seconds, "value": value}
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        tmp = path.with_name(f"{path.stem}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError:
+            tmp.unlink(missing_ok=True)

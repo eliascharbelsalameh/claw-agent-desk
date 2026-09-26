@@ -24,3 +24,17 @@ def test_missing_key(tmp_path):
 def test_cache_key_is_stable():
     assert cache_key("a", 1, None) == cache_key("a", 1, None)
     assert cache_key("a", 1) != cache_key("a", 2)
+
+
+def test_a_failed_write_is_swallowed_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    import data_layer.cache as cache_module
+
+    cache = DiskCache(tmp_path)
+
+    def locked(*args, **kwargs):
+        raise PermissionError("the file is being used by another process")
+
+    monkeypatch.setattr(cache_module.os, "replace", locked)
+    cache.set("k", {"v": 1}, ttl_seconds=60)  # must not raise
+    assert cache.get("k") is None
+    assert list(tmp_path.glob("*.tmp")) == []
