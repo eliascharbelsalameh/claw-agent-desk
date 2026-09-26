@@ -37,11 +37,13 @@ from ui.support import (  # noqa: E402
 load_user_env()
 
 from agents.critic_loop import CHALLENGE_AGREED_BUYS, MAX_ROUNDS  # noqa: E402
-from agents.pipeline import DeskPipeline, SymbolRun, default_trace_path  # noqa: E402
+from agents.pipeline import DeskPipeline, ModelOutages, SymbolRun, default_trace_path  # noqa: E402
+from agents.state import DeskState  # noqa: E402
 from agents.trace import TraceLogger  # noqa: E402
 from data_layer.llm_client import AGENT_MODELS, DEFAULT_MODEL_HEALTH, role_models  # noqa: E402
 
 LOG_DIR = Path(os.environ.get("CLAW_DESK_LOG_DIR", REPO_ROOT / "logs"))
+STATE_PATH = Path(os.environ.get("CLAW_DESK_STATE", REPO_ROOT / "state" / "desk_state.json"))
 FULL, DATA_ONLY = "Full desk", "Data only (no Build credits)"
 
 st.set_page_config(page_title="Claw Agent Desk", layout="wide")
@@ -78,6 +80,16 @@ def render_context(ctx) -> None:
     c3.metric("Relative volume (IEX)", f"{rel:.2f}x" if isinstance(rel, (int, float)) else "-")
     c4.metric("News items (company)", len(ctx.news), f"{ctx.news_unrelated_dropped} unrelated dropped",
               delta_color="off")
+    tech, val = ctx.technicals or {}, ctx.valuation or {}
+    nxt = (ctx.earnings or {}).get("next_report") or {}
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("RSI (14)", tech.get("rsi_14", "-"))
+    vs_spy = tech.get("change_20d_vs_spy_pp")
+    c2.metric("20-day vs SPY", f"{vs_spy:+.1f} pp" if isinstance(vs_spy, (int, float)) else "-")
+    pe = val.get("pe_ttm")
+    c3.metric("P/E (TTM)", pe if pe is not None else "n/m" if val else "-")
+    c4.metric("Next earnings", nxt.get("date", "-"),
+              f"in {nxt['calendar_days_until']} days" if nxt else None, delta_color="off")
     if price.get("latest_bar_in_progress"):
         st.info(price.get("note", "Session in progress."))
     if rv.get("session_in_progress"):
@@ -90,6 +102,13 @@ def render_context(ctx) -> None:
             st.markdown(ctx.briefing)
     elif ctx.briefing_model is None:
         st.caption("No briefing (data-only run, or every briefing model failed - see data gaps).")
+    with st.expander("Valuation, technicals, earnings (computed by the desk)"):
+        for title, block in (("Valuation", ctx.valuation), ("Technicals", ctx.technicals),
+                             ("Earnings", ctx.earnings)):
+            if block:
+                st.markdown(f"**{title}**")
+                st.json({k: v for k, v in block.items() if k != "note"}, expanded=False)
+                st.caption(block.get("note", ""))
     with st.expander("Fundamentals, macro, news, filings"):
         if ctx.fundamentals:
             st.dataframe([{"item": k, "value": v.get("value"), "period_end": v.get("period_end"),
@@ -111,7 +130,10 @@ def render_context(ctx) -> None:
 def render_verdict(v) -> None:
     st.markdown(f"**{v.role}** · {model_note(v)}")
     if not v.ok:
-        st.error(f"Failed: {v.error}")
+        if v.call_failed:
+            st.warning(f"Model unreachable (Build failure) - the stock is deferred and retried: {v.error}")
+        else:
+            st.error(f"Failed: {v.error}")
         return
     st.markdown(f"{rec_text(v.recommendation)} · confidence {v.confidence}")
     st.write(v.thesis)
@@ -131,6 +153,12 @@ def render_verdict(v) -> None:
 def render_critic_loop(loop) -> None:
     st.markdown(f"**Critic loop** ({loop.trigger}): {outcome_text(loop.outcome, loop.recommendation)} "
                 f"- {loop.reason}")
+    if loop.resume:
+        kept = [name for name, have in (("the critique", loop.resume.get("critique")),
+                                        (", ".join(loop.resume.get("revised") or {}) + " re-vote",
+                                         loop.resume.get("revised"))) if have]
+        st.caption(f"Resumes at round {loop.resume['round']}"
+                   + (f", keeping {' and '.join(kept)}" if kept else "") + ".")
     for r in loop.rounds:
         critique = r["critique"]
         with st.expander(f"Round {r['round']}", expanded=True):
@@ -156,6 +184,34 @@ def render_critic_loop(loop) -> None:
                 st.markdown(f"Cross-check after round: {outcome_text(cc['outcome'], cc.get('recommendation'))}")
 
 
+BIAS_COLORS = {"passed": "green", "vetoed": "red", "failed": "red", "deferred": "violet"}
+
+
+def render_bias(gate) -> None:
+    color = BIAS_COLORS.get(gate.outcome, "gray")
+    st.markdown(f"**Bias gate:** :{color}[**{gate.outcome.upper()}**] - {gate.reason}")
+    cols = st.columns(len(gate.checks) or 1)
+    for col, (role, check) in zip(cols, gate.checks.items()):
+        with col:
+            st.markdown(f"**{role}** `{check.get('model')}`")
+            if check.get("error"):
+                st.warning(f"Failed: {check['error']}")
+                continue
+            st.markdown(f"{'flag' if check.get('verdict') == 'flag' else 'pass'} · news sentiment "
+                        f"{check.get('news_sentiment')}")
+            st.write(check.get("reason"))
+            st.dataframe([{"check": name, "skewed": c.get("skewed"), "why": c.get("why")}
+                          for name, c in (check.get("checks") or {}).items()], hide_index=True)
+
+
+def render_technical(tech) -> None:
+    color = {"passed": "green", "waiting": "orange", "failed": "red", "deferred": "violet"}.get(tech.outcome, "gray")
+    st.markdown(f"**Technical** `{tech.model}`: :{color}[**{(tech.timing or tech.outcome).upper()}**] - "
+                f"{tech.reason or tech.error}")
+    if tech.timing:
+        st.caption(f"4h trend {tech.trend_4h} · support {tech.support} · resistance {tech.resistance}")
+
+
 def render_run(run: SymbolRun) -> None:
     st.markdown(f"### {run.symbol} - {outcome_text(run.outcome, run.recommendation)}")
     render_context(run.context)
@@ -169,6 +225,10 @@ def render_run(run: SymbolRun) -> None:
         st.markdown(f"**Cross-check:** {outcome_text(cc.outcome, cc.recommendation)} - {cc.reason}")
     if run.critic_loop:
         render_critic_loop(run.critic_loop)
+    if run.bias:
+        render_bias(run.bias)
+    if run.technical:
+        render_technical(run.technical)
 
 
 def summary_rows(runs: list[SymbolRun]) -> list[dict]:
@@ -181,6 +241,8 @@ def summary_rows(runs: list[SymbolRun]) -> list[dict]:
         row["critic loop"] = (f"{run.critic_loop.outcome} after {len(run.critic_loop.rounds)} round(s)"
                               if run.critic_loop else "")
         row["final"] = (f"{run.outcome} {run.recommendation or ''}".strip() if run.outcome else "data only")
+        row["bias gate"] = run.bias.outcome if run.bias else ""
+        row["entry"] = (run.technical.timing or run.technical.outcome) if run.technical else ""
         row["data gaps"] = len(run.context.data_gaps)
         rows.append(row)
     return rows
@@ -222,7 +284,7 @@ st.title("Claw Agent Desk")
 st.caption("Research demo on public and paper-trading data - not financial advice. "
            "Volume figures are IEX-only (~4% of US volume); only relative volume is meaningful.")
 
-run_tab, trace_tab = st.tabs(["Run", "Trace viewer"])
+run_tab, state_tab, trace_tab = st.tabs(["Run", "Desk state", "Trace viewer"])
 
 with run_tab:
     if start:
@@ -241,10 +303,12 @@ with run_tab:
                 started = datetime.now(timezone.utc).isoformat()
                 st.session_state["runs"] = []
                 st.session_state["meta"] = {"trace": str(trace.path), "started": started, "symbols": symbols,
-                                            "mode": mode}
+                                            "mode": mode, "run_critic": run_critic,
+                                            "challenge_buys": challenge_buys, "max_rounds": int(max_rounds)}
                 pipeline = DeskPipeline.from_settings(
                     trace=trace, use_llm=not data_only, run_critic=run_critic,
                     challenge_agreed_buys=challenge_buys, max_rounds=int(max_rounds),
+                    outages=st.session_state.setdefault("outages", ModelOutages()),
                 )
                 t0 = time.time()
                 with st.status(f"Running the desk on {', '.join(symbols)}...", expanded=True) as status:
@@ -261,6 +325,10 @@ with run_tab:
                             st.write(f"**{symbol}** cross-check: {outcome_text(payload.outcome, payload.recommendation)}")
                         elif stage == "critic_loop":
                             st.write(f"**{symbol}** critic loop: {outcome_text(payload.outcome, payload.recommendation)}")
+                        elif stage == "bias":
+                            st.write(f"**{symbol}** bias gate: {payload.outcome}")
+                        elif stage == "technical":
+                            st.write(f"**{symbol}** entry timing: {payload.timing or payload.outcome}")
                         elif stage == "done":
                             st.session_state["runs"].append(payload)
 
@@ -270,6 +338,21 @@ with run_tab:
 
     runs = st.session_state.get("runs") or []
     meta = st.session_state.get("meta") or {}
+    deferred = [i for i, r in enumerate(runs) if r.deferred]
+    if deferred and st.button(f"Retry the {len(deferred)} deferred stock(s)", type="primary"):
+        trace = TraceLogger(meta.get("trace") or default_trace_path(LOG_DIR))
+        pipeline = DeskPipeline.from_settings(
+            trace=trace, run_critic=meta.get("run_critic", True),
+            challenge_agreed_buys=meta.get("challenge_buys", CHALLENGE_AGREED_BUYS),
+            max_rounds=meta.get("max_rounds", MAX_ROUNDS),
+            outages=st.session_state.setdefault("outages", ModelOutages()),
+        )
+        with st.status("Retrying deferred stocks...", expanded=True) as status:
+            for i in deferred:
+                st.write(f"**{runs[i].symbol}**: resuming from the failed step")
+                runs[i] = pipeline.resume_symbol(runs[i])
+                st.write(f"**{runs[i].symbol}**: {outcome_text(runs[i].outcome, runs[i].recommendation)}")
+            status.update(label="Retry finished", state="complete", expanded=False)
     if runs:
         st.subheader("Summary")
         st.dataframe(summary_rows(runs), hide_index=True)
@@ -284,6 +367,42 @@ with run_tab:
                 render_run(run)
     elif not start:
         st.info("Pick symbols and a mode in the sidebar, then run the desk.")
+
+with state_tab:
+    st.caption(f"What the scheduler (python -m agents.scheduler) remembers between cycles: {STATE_PATH}")
+    if not STATE_PATH.exists():
+        st.info("No state yet - the scheduler hasn't run on this machine.")
+    else:
+        desk = DeskState.load(STATE_PATH)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Positions (desk)", len(desk.positions))
+        c2.metric("Deferred", len(desk.pending))
+        c3.metric("Decisions logged", len(desk.decisions))
+        c4.metric("Last decision session", desk.last_decision_session or "-")
+        if desk.positions:
+            st.subheader("Positions the desk opened")
+            st.dataframe([{"symbol": s, **{k: v for k, v in p.items() if k != "reason"}, "reason": p.get("reason")}
+                          for s, p in desk.positions.items()], hide_index=True)
+        if desk.pending:
+            st.subheader("Deferred (retried by the next pass)")
+            st.dataframe([{"symbol": s, "session": p.get("session"), "attempts": p.get("attempts"),
+                           "since": p.get("first_deferred"), "reason": p.get("reason")}
+                          for s, p in desk.pending.items()], hide_index=True)
+        if desk.outages:
+            st.warning("Models down since: " + ", ".join(f"{m} ({t[:16]})" for m, t in desk.outages.items()))
+        if desk.decisions:
+            st.subheader("Decisions (newest first)")
+            st.dataframe([{k: d.get(k) for k in ("session", "symbol", "outcome", "recommendation", "reason",
+                                                  "decided_at")} for d in reversed(desk.decisions)],
+                         hide_index=True)
+        if desk.cycles:
+            st.subheader("Passes (newest first)")
+            st.dataframe([{"kind": c.get("kind"), "session": c.get("session"), "started": c.get("started"),
+                           "decisions": len(c.get("decisions") or {}), "pending": ", ".join(c.get("pending") or []),
+                           "orders": sum(1 for o in c.get("orders") or [] if "side" in o),
+                           "llm calls": (c.get("llm") or {}).get("llm_calls"),
+                           "llm errors": (c.get("llm") or {}).get("llm_errors"),
+                           "dry run": c.get("dry_run")} for c in reversed(desk.cycles)], hide_index=True)
 
 with trace_tab:
     files = sorted(LOG_DIR.glob("*.jsonl"), reverse=True) if LOG_DIR.exists() else []

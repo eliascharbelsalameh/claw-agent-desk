@@ -1,0 +1,25 @@
+# systemd *user* unit for the desk's scheduler (agents/scheduler.py).
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/claw-desk-scheduler.service ~/.config/systemd/user/
+#   loginctl enable-linger "$USER"     # keep it running after you log out
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now claw-desk-scheduler
+#   journalctl --user -u claw-desk-scheduler -f
+# Credentials come from the repo's .env (read by the app itself), so none
+# appear in this file, in `systemctl show`, or in the process list.
+
+[Unit]
+Description=Claw Agent Desk scheduler (Alpaca paper trading)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/claw-agent-desk
+ExecStart=%h/claw-agent-desk/.venv/bin/python -m agents.scheduler --paper-orders
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

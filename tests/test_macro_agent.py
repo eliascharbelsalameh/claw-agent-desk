@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from agents.macro_agent import (
     BRIEFING_ATTEMPTS,
     MacroContextAgent,
+    StockContext,
     briefing_problems,
     company_short_name,
     extract_fundamentals,
@@ -95,18 +96,52 @@ class FakeEdgar:
         }
 
     def get_company_facts(self, ticker):
-        return {"facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": [
-            {"start": "2026-03-30", "end": "2026-06-28", "val": 100, "form": "10-Q", "filed": "2026-08-01"},
-        ]}}}}}
+        return {"facts": {"us-gaap": {
+            "NetIncomeLoss": {"units": {"USD": _flow(fy=400, ytd_prior=280, ytd=330, quarter=100)}},
+            "Revenues": {"units": {"USD": _flow(fy=4000, ytd_prior=2800, ytd=3300, quarter=1000)}},
+            "EarningsPerShareDiluted": {"units": {"USD/shares": _flow(fy=4.0, ytd_prior=2.8, ytd=3.3, quarter=1.0)}},
+            "WeightedAverageNumberOfDilutedSharesOutstanding": {"units": {"shares": [
+                {"start": "2026-03-30", "end": "2026-06-28", "val": 100, "form": "10-Q", "filed": "2026-08-01"},
+            ]}},
+        }}}
+
+
+def _flow(fy, ytd_prior, ytd, quarter):
+    """An Apple-like fiscal calendar: FY2025, its 9-month YTD, and FY2026's
+    9-month YTD and third quarter (TTM = fy + ytd - ytd_prior)."""
+    return [
+        {"start": "2024-09-29", "end": "2025-09-27", "val": fy, "form": "10-K", "filed": "2025-10-31"},
+        {"start": "2024-09-29", "end": "2025-06-28", "val": ytd_prior, "form": "10-Q", "filed": "2025-08-01"},
+        {"start": "2025-09-28", "end": "2026-06-28", "val": ytd, "form": "10-Q", "filed": "2026-08-01"},
+        {"start": "2026-03-30", "end": "2026-06-28", "val": quarter, "form": "10-Q", "filed": "2026-08-01"},
+    ]
+
+
+EARNINGS_ROWS = [
+    {"symbol": "AAPL", "date": "2026-10-28", "hour": "amc", "quarter": 4, "year": 2026,
+     "epsEstimate": 2.02, "epsActual": None, "revenueEstimate": 1.15e11, "revenueActual": None},
+    {"symbol": "AAPL", "date": "2026-08-30", "hour": "bmo", "quarter": 3, "year": 2026,
+     "epsEstimate": 2.0, "epsActual": 2.1, "revenueEstimate": 1.0e11, "revenueActual": 0.95e11},
+]
 
 
 class FakeFinnhub:
+    def __init__(self, calendar_fails=False):
+        self.calendar_fails = calendar_fails
+        self.calendar_calls = []
+
     def get_company_news(self, symbol, from_date, to_date):
         return [
             {"headline": "old", "datetime": 1, "age_hours": 100.0, "summary": "Apple ships"},
             {"headline": "new", "datetime": 2, "age_hours": 2.04, "summary": "AAPL moves"},
             {"headline": "Garmin rallies", "datetime": 3, "age_hours": 1.0, "summary": "watches"},
         ]
+
+    def get_earnings_calendar(self, symbol, from_date, to_date):
+        self.calendar_calls.append((symbol, from_date, to_date))
+        if self.calendar_fails:
+            raise ConnectionError("finnhub down")
+        return list(EARNINGS_ROWS)
 
 
 GOOD_BRIEFING = (
@@ -232,6 +267,43 @@ def test_run_builds_full_context_without_llm():
     assert ctx.company_name == "Apple Inc."
     assert ctx.data_gaps == []
     assert ctx.briefing is None
+    # computed by the desk: TTM = 400 + 330 - 280 = 450 net income, EPS 4.5
+    assert ctx.valuation["trailing_12m"] == {
+        "revenue": 4500, "net_income": 450, "eps_diluted": 4.5, "period_end": "2026-06-28",
+    }
+    assert ctx.valuation["pe_ttm"] == round(124 / 4.5, 2)
+    assert ctx.valuation["market_cap"] == 12400 and ctx.valuation["ps_ttm"] == round(12400 / 4500, 2)
+    assert ctx.technicals["sma_20"] == round(sum(range(105, 125)) / 20, 2)
+    assert ctx.technicals["change_5d_vs_spy_pp"] == 0.0  # the fake serves the same bars for SPY
+    assert ctx.earnings["next_report"]["date"] == "2026-10-28"
+    assert ctx.earnings["latest_report"]["eps_surprise_pct"] == 5.0
+    facts = ctx.facts()
+    assert {"technicals", "valuation", "earnings"} <= facts.keys()
+    assert not any("No valuation data" in line for line in facts["limitations"])
+
+
+def test_benchmark_and_calendar_failures_become_gaps():
+    class NoSpyAlpaca(FakeAlpaca):
+        def get_bars(self, symbol, timeframe="1Hour", start=None, end=None, **kw):
+            if symbol == "SPY":
+                raise ConnectionError("spy down")
+            return super().get_bars(symbol, timeframe, start, end, **kw)
+
+    agent = _agent(alpaca=NoSpyAlpaca())
+    agent._finnhub = FakeFinnhub(calendar_fails=True)
+    ctx = agent.run(["AAPL"])["AAPL"]
+    assert "benchmark SPY bars: ConnectionError: spy down" in ctx.data_gaps
+    assert "earnings calendar: ConnectionError: finnhub down" in ctx.data_gaps
+    assert ctx.earnings is None
+    assert ctx.technicals["change_5d_vs_spy_pp"] is None
+    assert "vs_spy: no SPY bars" in ctx.technicals["unavailable"]
+
+
+def test_old_frozen_contexts_still_load():
+    # contexts saved before the computed blocks existed (the wide test's)
+    old = {"symbol": "AAPL", "generated_at": NOW.isoformat(), "macro": {}, "price": {"last_close": 1.0}}
+    ctx = StockContext(**old)
+    assert ctx.valuation is None and ctx.technicals is None and ctx.earnings is None
 
 
 def test_run_passes_explicit_date_range_to_alpaca():

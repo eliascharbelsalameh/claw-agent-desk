@@ -179,7 +179,11 @@ def test_analyze_returns_checked_verdict_and_logs(tmp_path):
 
     model, messages, kwargs = llm.calls[0]
     assert "Source facts (authoritative" in messages[1]["content"]
-    assert "IEX" in messages[0]["content"] and "only recommend \"buy\"" in messages[0]["content"]
+    assert "IEX" in messages[0]["content"]
+    # one bar for buy and avoid; no one-sided warning about buys (Sept 26, 2026)
+    assert "Buy and avoid take the same bar" in messages[0]["content"]
+    assert "only recommend" not in messages[0]["content"]
+    assert "not picked" not in messages[0]["content"]
     assert "Do not claim growth, valuation" in messages[0]["content"]
     assert "An empty data_gaps does not mean there are no data concerns" in messages[0]["content"]
     assert '"limitations"' in messages[1]["content"]

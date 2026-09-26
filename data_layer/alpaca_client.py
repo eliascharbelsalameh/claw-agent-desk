@@ -8,7 +8,7 @@ of trusting the absolute number (see get_relative_volume below).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -97,9 +97,17 @@ class AlpacaClient(BaseClient):
         feed: str = "iex",
         cache_ttl: float | None = 300.0,
         max_pages: int = 50,
+        adjustment: str = "split",
     ) -> list[dict[str, Any]]:
+        """Bars in ascending time order. Split-adjusted by default: Alpaca
+        serves raw prices otherwise, and a year of NFLX bars across its
+        10-for-1 split put the stock 94% below its "52-week high" (live,
+        Sept 26, 2026). Split adjustment scales volume too, and leaves bars
+        after the last split unchanged, so the latest price is the real one."""
         url = f"{self._settings.alpaca_data_base_url}/v2/stocks/{symbol}/bars"
-        params: dict[str, Any] = {"timeframe": timeframe, "limit": limit, "feed": feed}
+        params: dict[str, Any] = {
+            "timeframe": timeframe, "limit": limit, "feed": feed, "adjustment": adjustment,
+        }
         if start is not None:
             params["start"] = start.astimezone(timezone.utc).isoformat()
         if end is not None:
@@ -203,6 +211,14 @@ class AlpacaClient(BaseClient):
         url = f"{self._settings.alpaca_trading_base_url}/v2/clock"
         return self._get_json(url, headers=self._auth_headers())
 
+    def get_calendar(self, start: date, end: date, cache_ttl: float = 24 * 3600.0) -> list[dict[str, Any]]:
+        """Trading sessions between two dates: [{"date", "open", "close"}],
+        holidays excluded and early closes included. The portfolio counts
+        holding periods in these sessions, not calendar days."""
+        url = f"{self._settings.alpaca_trading_base_url}/v2/calendar"
+        params = {"start": start.isoformat(), "end": end.isoformat()}
+        return self._get_json(url, params=params, headers=self._auth_headers(), cache_ttl=cache_ttl)
+
     # --- Paper trading account (simulated execution, spec section 5) ---
 
     def get_account(self) -> dict[str, Any]:
@@ -214,23 +230,34 @@ class AlpacaClient(BaseClient):
         return self._get_json(url, headers=self._auth_headers())
 
     def submit_market_order(
-        self, symbol: str, qty: float, side: str, time_in_force: str = "day"
+        self,
+        symbol: str,
+        qty: float,
+        side: str,
+        time_in_force: str = "day",
+        client_order_id: str | None = None,
     ) -> dict[str, Any]:
+        """Market order on the paper account. This POST goes through the
+        same retry as every request, so a connection dropped after Alpaca
+        accepted the order would be sent again: pass a `client_order_id`
+        derived from the decision, and Alpaca rejects the repeat (HTTP 422)
+        instead of placing a second order - see get_order_by_client_id."""
         if side not in ("buy", "sell"):
             raise ValueError("side must be 'buy' or 'sell'")
         url = f"{self._settings.alpaca_trading_base_url}/v2/orders"
-        response = request_with_retry(
-            self._session,
-            "POST",
-            url,
-            headers=self._auth_headers(),
-            json={
-                "symbol": symbol,
-                "qty": str(qty),
-                "side": side,
-                "type": "market",
-                "time_in_force": time_in_force,
-            },
-        )
+        body = {
+            "symbol": symbol,
+            "qty": str(qty),
+            "side": side,
+            "type": "market",
+            "time_in_force": time_in_force,
+        }
+        if client_order_id:
+            body["client_order_id"] = client_order_id
+        response = request_with_retry(self._session, "POST", url, headers=self._auth_headers(), json=body)
         response.raise_for_status()
         return response.json()
+
+    def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
+        url = f"{self._settings.alpaca_trading_base_url}/v2/orders:by_client_order_id"
+        return self._get_json(url, params={"client_order_id": client_order_id}, headers=self._auth_headers())

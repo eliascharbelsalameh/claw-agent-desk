@@ -37,6 +37,7 @@ from .llm_json import (  # noqa: F401 - parsing helpers re-exported for existing
     extract_json_object,
     repair_json_quotes,
     request_json,
+    unreachable,
 )
 from .macro_agent import IEX_VOLUME_NOTE, StockContext
 from .trace import TraceLogger
@@ -75,7 +76,15 @@ EVIDENCE_STATUS_NOTE = (
     "still unverified third-party reporting."
 )
 
-SYSTEM_PROMPT = f"""You are an equity analyst on a research desk. You receive a context packet for one US stock and decide whether it belongs in a long-only portfolio over {HORIZON}. A second analyst, on a different model, analyses the same packet independently; if you disagree, the stock is not picked, so only recommend "buy" when the evidence genuinely supports it.
+# The three recommendations take one symmetric bar (decided Sept 26, 2026).
+# Until then the prompt told each analyst that a disagreement drops the
+# stock, "so only recommend buy when the evidence genuinely supports it",
+# and defined hold as "no strong case either way" - a one-sided brake on
+# top of the desk's own (strict matching, the critic challenging every
+# buy). Across the Sept 25-26 tests muse-glimmer never said buy (0 of 23)
+# and 38 of 43 holds cited the missing valuation data. Caution now lives in
+# the desk's structure, where the trace shows it, not inside each analyst.
+SYSTEM_PROMPT = f"""You are an equity analyst on a research desk. You receive a context packet for one US stock and decide whether it belongs in a long-only portfolio over {HORIZON}. A second analyst, on a different model, analyses the same packet independently.
 
 Rules:
 - Use only the context packet. Your background knowledge of this company may be outdated: where it conflicts with the packet, the packet wins, and never cite prices, figures or events from memory.
@@ -85,7 +94,7 @@ Rules:
 - Two different lists describe what is missing. "data_gaps" lists sources that failed to load for this run (often empty). "limitations" lists what this desk never provides (always present). Both matter.
 - Do not claim growth, valuation, margins or trends unless the source facts contain the numbers that show them (e.g. fundamentals yoy_pct_change). Do not treat anything listed in limitations as known or "implied".
 - "data_concerns" is your own assessment, not a copy of data_gaps: list each missing, stale or unreliable piece of information (from data_gaps, from limitations, or anything else you noticed) that actually affected this recommendation or its confidence, and how. An empty data_gaps does not mean there are no data concerns.
-- "hold" means no strong case either way; "avoid" means the risks outweigh the case for buying.
+- Weigh the drivers against the risks and judge where the balance of evidence leans for someone holding the shares over the horizon: "buy" if it leans toward a gain, "avoid" if it leans toward a loss, "hold" if it is balanced or too thin to lean either way. Buy and avoid take the same bar.
 - The portfolio holds real shares only, long-only: no short selling, options or other derivatives, leverage, or negotiated deals. "buy" means buying the shares outright; "avoid" means not holding them, never shorting.
 
 Reply with ONLY a JSON object, no prose before or after, with exactly these keys:
@@ -155,6 +164,10 @@ class AnalystVerdict:
     # because it failed minutes earlier (so `fallbacks` is empty).
     primary_model: str | None = None
     error: str | None = None
+    # With `error` set: True when no model could be reached (a Build
+    # failure - the pipeline defers the stock and retries next cycle), False
+    # when a model answered but unusably (final: the stock is aborted).
+    call_failed: bool = False
 
     @property
     def ok(self) -> bool:
@@ -483,6 +496,10 @@ class AnalystAgent:
         verdict.fallbacks = reply.fallbacks
         if not reply.ok:
             verdict.error = reply.error if reply.call_failed else f"unparseable verdict: {reply.error}"
+            verdict.call_failed = unreachable(reply)
+            self._log("verdict_failed", {"symbol": ctx.symbol, "review_round": verdict.review_round,
+                                         "model": verdict.model, "error": verdict.error,
+                                         "call_failed": verdict.call_failed})
             return None
         for key, value in reply.value.items():
             setattr(verdict, key, value)
@@ -490,15 +507,25 @@ class AnalystAgent:
         verdict.evidence_check = check_evidence(verdict.evidence, ctx.facts())
         return reply.raw
 
-    def analyze(self, ctx: StockContext, *, exclude: Collection[str] = ()) -> AnalystVerdict:
+    def analyze(
+        self, ctx: StockContext, *, exclude: Collection[str] = (), allow_backup: bool = False
+    ) -> AnalystVerdict:
         """Independent first verdict. `exclude` names models this analyst
-        must not use - the model the other analyst already ran on."""
+        must not use - the model the other analyst already ran on.
+
+        Only the role's primary answers unless `allow_backup`. Decided Sept
+        26, 2026: when the primary can't be reached the stock is deferred
+        and retried next cycle, rather than decided by a backup that judges
+        differently (muse-glimmer, analyst_1's backup, said buy 0 times in
+        23 verdicts). The pipeline allows backups only once a primary has
+        been down for a long stretch (pipeline.ANALYST_BACKUP_AFTER)."""
         verdict = self._new_verdict(ctx)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": ctx.to_prompt()},
         ]
-        if self._complete(ctx, verdict, messages, self.models, set(exclude)) is not None:
+        models = self.models if allow_backup else self.models[:1]
+        if self._complete(ctx, verdict, messages, models, set(exclude)) is not None:
             self._log("verdict", verdict.to_dict())
         return verdict
 
@@ -540,10 +567,10 @@ class AnalystAgent:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": f"{ctx.to_prompt()}\n\n{review}"},
         ]
-        # The same model that wrote the verdict revises it when it can; the
-        # other analyst's model is never an option.
-        models = list(dict.fromkeys([own.model, *self.models]))
-        raw = self._complete(ctx, verdict, messages, models, {other.model})
+        # Only the model that wrote the verdict revises it: a re-vote from
+        # another model would be a different analyst. If it can't be reached
+        # the critic loop is deferred and this re-vote retried next cycle.
+        raw = self._complete(ctx, verdict, messages, [own.model], {other.model})
         if raw is not None:
             verdict.response_to_critique = parse_critique_responses(raw.get("response_to_critique"))
             self._log("verdict", verdict.to_dict())

@@ -25,6 +25,7 @@ from typing import Any, Callable
 from data_layer.alpaca_client import session_in_progress
 from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
+from .computed_facts import compute_technicals, compute_valuation, summarize_earnings
 from .llm_json import BACKUP_CONNECT_RETRIES
 from .trace import TraceLogger
 
@@ -73,8 +74,20 @@ NEWS_LOOKBACK_DAYS = 7
 MAX_NEWS_ITEMS = 15
 NEWS_SUMMARY_CHARS = 300
 
-DAILY_LOOKBACK_DAYS = 90
+# A year and a bit of daily bars: the 200-day average and the 52-week range
+# (computed_facts.compute_technicals) need ~252 sessions; only the computed
+# summaries reach the prompt, never the bars themselves.
+DAILY_LOOKBACK_DAYS = 400
 BARS_4H_LOOKBACK_DAYS = 15
+# The technical agent's entry timeframe (spec section 3, step 5).
+BARS_1H_LOOKBACK_DAYS = 7
+# Market benchmark for the stocks' relative moves, fetched once per run.
+BENCHMARK_SYMBOL = "SPY"
+
+# Finnhub's free calendar lists reports about a month back; ahead, the next
+# report of any company falls within ~3 months.
+EARNINGS_LOOKBACK_DAYS = 35
+EARNINGS_LOOKAHEAD_DAYS = 100
 
 # The briefing is summarization, not reasoning, so thinking is switched off:
 # with it on, the macro model spent its entire 4096-token budget thinking
@@ -112,12 +125,21 @@ IEX_VOLUME_NOTE = (
 # failed to load *this* run. Without it, gpt-oss-20b equated "data
 # concerns" with the (empty) data_gaps and reported none, while treating
 # valuation it had never been given as "implied" (live, Sept 2026).
+# Rewritten Sept 26, 2026, when the desk started computing trailing
+# valuation, technicals and the earnings calendar (computed_facts.py):
+# each line says what is still missing, not what used to be.
 DESK_LIMITATIONS = (
-    "No valuation data: no share count, market capitalization, P/E or other multiples.",
-    "No forward-looking data: no company guidance, analyst estimates or earnings calendar.",
-    "Fundamentals cover only the latest reported period and the same period a year earlier.",
+    "Valuation is trailing only: market cap, P/E and price-to-sales from the last twelve months "
+    "of reported results. No forward multiples, and no comparison with peers or with the "
+    "stock's own history of multiples.",
+    "No company guidance. The only forward-looking figures are the consensus estimates attached "
+    "to the next earnings report in the earnings calendar, when one is listed.",
+    "Fundamentals cover the latest reported period, the same period a year earlier, and the "
+    "trailing twelve months used for valuation.",
     "News headlines and summaries are unverified third-party reporting, keyword-matched to "
     "the company; they are not confirmed facts.",
+    "Prices come from IEX trades (free Alpaca feed): close to, but not exactly, consolidated "
+    "market prices.",
     IEX_VOLUME_NOTE,
 )
 
@@ -140,6 +162,7 @@ Rules:
 - Do NOT give opinions, forecasts, price targets, ratings, or buy/sell/hold language. Do not say whether anything is good or bad for the stock.
 - Keep every number you mention exactly as given, with its date and its unit. Do not derive new figures (no month-on-month changes, no unit conversions such as index points into basis points) that are not already in the data.
 - Describe filings by form, date and item number; do not guess what an 8-K item number means.
+- The technicals, valuation and earnings blocks were computed by the desk from the source data (each block's note says how). Report their figures as given, without labels such as "overbought" or "cheap".
 - Flag explicitly any data listed under data_gaps, and any news older than 72 hours as potentially already priced in.
 - The news list has already been filtered to items that mention the company (news_unrelated_dropped says how many were removed). Some remaining items still mention it only in passing: say so when that is the case rather than presenting them as company news.
 - {IEX_VOLUME_NOTE}
@@ -154,6 +177,8 @@ class SharedContext:
     macro: dict[str, Any]
     gaps: list[str]
     clock: dict[str, Any] | None
+    # Daily bars of BENCHMARK_SYMBOL for the relative moves (empty = unavailable).
+    benchmark: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -162,10 +187,14 @@ class StockContext:
     generated_at: str
     macro: dict[str, Any]
     price: dict[str, Any] | None = None
+    technicals: dict[str, Any] | None = None
     relative_volume: dict[str, Any] | None = None
     bars_4h: list[dict[str, Any]] = field(default_factory=list)
+    bars_1h: list[dict[str, Any]] = field(default_factory=list)
     filings: list[dict[str, Any]] = field(default_factory=list)
     fundamentals: dict[str, Any] = field(default_factory=dict)
+    valuation: dict[str, Any] | None = None
+    earnings: dict[str, Any] | None = None
     company_name: str | None = None
     news: list[dict[str, Any]] = field(default_factory=list)
     news_unrelated_dropped: int = 0
@@ -174,10 +203,10 @@ class StockContext:
     briefing_model: str | None = None
 
     def facts(self) -> dict[str, Any]:
-        """Everything the analysts get as ground truth, minus the raw 4H
-        bars (those are for the technical agent, too long for a prompt)."""
+        """Everything the analysts get as ground truth, minus the raw 4H and
+        1H bars (those are for the technical agent, too long for a prompt)."""
         data = asdict(self)
-        for key in ("bars_4h", "briefing", "briefing_model"):
+        for key in ("bars_4h", "bars_1h", "briefing", "briefing_model"):
             data.pop(key)
         data["limitations"] = list(DESK_LIMITATIONS)
         return data
@@ -531,6 +560,7 @@ class MacroContextAgent:
         macro: dict[str, Any],
         macro_gaps: list[str],
         clock: dict[str, Any] | None = None,
+        benchmark: list[dict[str, Any]] | None = None,
     ) -> StockContext:
         now = self._now()
         ctx = StockContext(
@@ -561,6 +591,9 @@ class MacroContextAgent:
             ctx.price = summarize_daily_bars(daily, latest_in_progress=in_progress)
             if ctx.price is None:
                 ctx.data_gaps.append("daily bars: none returned")
+            ctx.technicals = compute_technicals(
+                daily, benchmark, BENCHMARK_SYMBOL, latest_in_progress=in_progress
+            )
 
         ctx.relative_volume = attempt(
             "relative volume", lambda: self._alpaca.get_relative_volume(ctx.symbol, clock=clock)
@@ -576,6 +609,15 @@ class MacroContextAgent:
         )
         if not ctx.bars_4h and not any(g.startswith("4h bars") for g in ctx.data_gaps):
             ctx.data_gaps.append("4h bars: none returned")
+        ctx.bars_1h = (
+            attempt(
+                "1h bars",
+                lambda: self._alpaca.get_bars(
+                    ctx.symbol, timeframe="1Hour", start=now - timedelta(days=BARS_1H_LOOKBACK_DAYS), end=now
+                ),
+            )
+            or []
+        )
 
         cik = attempt("EDGAR CIK lookup", lambda: self._edgar.get_cik(ctx.symbol))
         if cik is not None:
@@ -599,6 +641,19 @@ class MacroContextAgent:
                             f"EDGAR fundamentals {name}: latest value is for the period "
                             f"ending {fact['period_end']} (stale)"
                         )
+                ctx.valuation, valuation_gaps = compute_valuation(facts, ctx.price)
+                ctx.data_gaps.extend(valuation_gaps)
+
+        calendar = attempt(
+            "earnings calendar",
+            lambda: self._finnhub.get_earnings_calendar(
+                ctx.symbol,
+                now.date() - timedelta(days=EARNINGS_LOOKBACK_DAYS),
+                now.date() + timedelta(days=EARNINGS_LOOKAHEAD_DAYS),
+            ),
+        )
+        if calendar is not None:
+            ctx.earnings = summarize_earnings(calendar, now.date())
 
         news = attempt(
             "news",
@@ -700,16 +755,36 @@ class MacroContextAgent:
                 "session is still running, so the latest price and volume may be partial"
             ]
 
+    def benchmark_bars(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """BENCHMARK_SYMBOL's daily bars over the same window as the stocks'."""
+        now = self._now()
+        try:
+            bars = self._alpaca.get_bars(
+                BENCHMARK_SYMBOL, timeframe="1Day",
+                start=now - timedelta(days=DAILY_LOOKBACK_DAYS), end=now,
+            )
+        except Exception as exc:  # noqa: BLE001 - becomes a data gap
+            return [], [f"benchmark {BENCHMARK_SYMBOL} bars: {type(exc).__name__}: {exc}"]
+        if not bars:
+            return [], [f"benchmark {BENCHMARK_SYMBOL} bars: none returned"]
+        return bars, []
+
     def prepare(self) -> SharedContext:
-        """What every stock in a run shares: macro series and the market
-        clock, fetched once so all stocks are judged against the same data."""
+        """What every stock in a run shares: macro series, the market clock
+        and the benchmark's bars, fetched once so all stocks are judged
+        against the same data."""
         macro, macro_gaps = self.gather_macro()
         clock, clock_gaps = self.market_clock()
-        return SharedContext(macro=macro, gaps=macro_gaps + clock_gaps, clock=clock)
+        benchmark, benchmark_gaps = self.benchmark_bars()
+        return SharedContext(
+            macro=macro, gaps=macro_gaps + clock_gaps + benchmark_gaps, clock=clock, benchmark=benchmark
+        )
 
     def build_context(self, symbol: str, shared: SharedContext) -> StockContext:
         """One stock's full context packet: gather, log, then brief."""
-        ctx = self.gather_stock(symbol, shared.macro, shared.gaps, clock=shared.clock)
+        ctx = self.gather_stock(
+            symbol, shared.macro, shared.gaps, clock=shared.clock, benchmark=shared.benchmark
+        )
         self._log("context_gathered", {"symbol": ctx.symbol, "facts": ctx.facts()})
         self.write_briefing(ctx)
         return ctx

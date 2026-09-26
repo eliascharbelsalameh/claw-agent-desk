@@ -133,6 +133,13 @@ class JsonReply:
         return self.error is None
 
 
+def unreachable(reply: JsonReply) -> bool:
+    """Whether a failed reply is worth retrying later: some candidate could
+    not be reached at all (a Build failure), rather than every model tried
+    having answered unusably."""
+    return not reply.ok and (reply.call_failed or any(f.get("call_failed") for f in reply.fallbacks))
+
+
 def request_json(
     llm: Any,
     models: str | Sequence[str],

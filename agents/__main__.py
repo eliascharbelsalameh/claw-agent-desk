@@ -72,6 +72,8 @@ def main() -> None:
         help="analyst roles to run after the context agent, e.g. analyst_1 analyst_2",
     )
     parser.add_argument("--no-critic", action="store_true", help="stop at the cross-check")
+    parser.add_argument("--no-bias", action="store_true", help="skip the bias gate on agreed buys")
+    parser.add_argument("--no-technical", action="store_true", help="skip the entry-timing agent")
     parser.add_argument("--log-dir", default="logs")
     args = parser.parse_args()
     if args.no_llm and args.analysts:
@@ -83,6 +85,8 @@ def main() -> None:
         use_llm=not args.no_llm,
         analyst_roles=tuple(args.analysts),
         run_critic=not args.no_critic,
+        run_bias=not args.no_bias,
+        run_technical=not args.no_technical,
     )
 
     def on_event(stage: str, symbol: str, payload) -> None:
@@ -97,6 +101,16 @@ def main() -> None:
                   flush=True)
         elif stage == "critic_loop":
             print(_loop_summary(payload), flush=True)
+        elif stage == "bias":
+            print(f"{symbol} bias gate: {payload.outcome.upper()} - {payload.reason}", flush=True)
+            for role, check in payload.checks.items():
+                status = check.get("verdict") or f"FAILED ({check.get('error')})"
+                print(f"  {role} [{check.get('model')}]: {status}, news sentiment "
+                      f"{check.get('news_sentiment')} - {check.get('reason') or ''}", flush=True)
+        elif stage == "technical":
+            print(f"{symbol} technical [{payload.model}]: {(payload.timing or payload.outcome).upper()} - "
+                  f"{payload.reason or payload.error} (4h trend {payload.trend_4h}, support {payload.support}, "
+                  f"resistance {payload.resistance})", flush=True)
 
     pipeline.run(args.symbols, on_event)
     print(f"trace: {trace.path}")

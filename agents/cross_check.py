@@ -13,8 +13,13 @@ Rules (decided Sept 25, 2026 - strict matching, no confidence gate):
 - hold vs avoid                        -> "abort" (not covered by the decisions;
                                           strict matching applies. Either way
                                           no new position results)
-- either verdict failed                -> "abort" (a failed analyst never counts
-                                          as agreement)
+- a verdict failed: the model answered  -> "abort" (a failed analyst never counts
+  unusably                                as agreement)
+- a verdict failed: its model could not -> "deferred" (decided Sept 26, 2026: a
+  be reached (Build failure)              Build outage is not a decision. The
+                                          stock is retried next cycle from this
+                                          step; it still never counts as
+                                          agreement)
 - both analysts on the same model      -> "abort" (the check would not be
                                           independent - spec section 4)
 
@@ -34,6 +39,7 @@ AGENT_NAME = "cross_check"
 AGREE = "agree"
 CRITIC = "critic"
 ABORT = "abort"
+DEFERRED = "deferred"
 
 
 @dataclass
@@ -53,6 +59,7 @@ def _summary(v: AnalystVerdict) -> dict[str, Any]:
         "model": v.model,
         "ok": v.ok,
         "error": v.error,
+        "call_failed": v.call_failed,
         "recommendation": v.recommendation,
         "confidence": v.confidence,
         "evidence_check": v.evidence_check,
@@ -61,9 +68,18 @@ def _summary(v: AnalystVerdict) -> dict[str, Any]:
 
 
 def _decide(a: AnalystVerdict, b: AnalystVerdict) -> tuple[str, str | None, str]:
-    failed = [v.role for v in (a, b) if not v.ok]
-    if failed:
-        return ABORT, None, f"verdict failed for {', '.join(failed)}; a failed analyst never counts as agreement"
+    # An unusable answer is final, so it aborts even when the other analyst
+    # is only unreachable: retrying the unreachable one couldn't change that.
+    unusable = [v.role for v in (a, b) if not v.ok and not v.call_failed]
+    if unusable:
+        return ABORT, None, f"verdict failed for {', '.join(unusable)}; a failed analyst never counts as agreement"
+    unreachable = [v.role for v in (a, b) if not v.ok]
+    if unreachable:
+        models = ", ".join(f"{v.role} ({v.model})" for v in (a, b) if not v.ok)
+        return DEFERRED, None, (
+            f"could not reach {models}: a Build failure, not a decision - retried next cycle, "
+            "never counted as agreement"
+        )
     if a.model == b.model:
         return ABORT, None, f"both analysts ran on {a.model}; the cross-check would not be independent"
     if a.recommendation == b.recommendation:

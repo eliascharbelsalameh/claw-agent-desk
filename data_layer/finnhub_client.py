@@ -51,3 +51,19 @@ class FinnhubClient(BaseClient):
             item["published_at"] = published.isoformat()
             item["age_hours"] = (now - published).total_seconds() / 3600.0
         return items
+
+    def get_earnings_calendar(
+        self, symbol: str, from_date: date, to_date: date, cache_ttl: float = 6 * 3600.0
+    ) -> list[dict[str, Any]]:
+        """Earnings reports for `symbol` between the two dates: date, hour
+        (bmo/amc/dmh), fiscal quarter/year, EPS and revenue estimates, and
+        the actuals once reported. On the free plan (checked live Sept 26,
+        2026) it lists reports about a month back and months ahead."""
+        params = {
+            "symbol": symbol,
+            "from": from_date.isoformat(),
+            "to": to_date.isoformat(),
+            "token": self._settings.require("finnhub_api_key"),
+        }
+        data = self._get_json(f"{BASE_URL}/calendar/earnings", params=params, cache_ttl=cache_ttl)
+        return list(data.get("earningsCalendar") or [])

@@ -53,3 +53,19 @@ def test_get_company_news_adds_age():
     assert "published_at" in news[0]
     _, _, kwargs = session.calls[0]
     assert kwargs["params"]["token"] == "finnhub-key"
+
+
+def test_get_earnings_calendar_unwraps_the_list():
+    row = {"symbol": "AAPL", "date": "2026-10-28", "hour": "amc", "epsEstimate": 2.02, "epsActual": None}
+    session = _FakeSession({"earningsCalendar": [row]})
+    client = FinnhubClient(settings=_settings(), session=session)
+    assert client.get_earnings_calendar("AAPL", date(2026, 8, 22), date(2026, 12, 31)) == [row]
+    _, url, kwargs = session.calls[0]
+    assert url.endswith("/calendar/earnings")
+    assert kwargs["params"]["symbol"] == "AAPL"
+    assert kwargs["params"]["from"] == "2026-08-22" and kwargs["params"]["to"] == "2026-12-31"
+
+
+def test_get_earnings_calendar_empty_response():
+    client = FinnhubClient(settings=_settings(), session=_FakeSession({"earningsCalendar": None}))
+    assert client.get_earnings_calendar("ZZZZ", date(2026, 8, 22), date(2026, 12, 31)) == []

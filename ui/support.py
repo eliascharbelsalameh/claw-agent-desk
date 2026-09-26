@@ -3,11 +3,8 @@ they can be tested without Streamlit: symbol parsing, credential presence,
 loading Windows user-level env vars, and summarizing a trace file."""
 from __future__ import annotations
 
-import json
 import os
 import re
-from collections import Counter
-from pathlib import Path
 from typing import Any, Callable, Iterable
 
 CREDENTIAL_NAMES = (
@@ -23,7 +20,11 @@ CREDENTIAL_NAMES = (
 _SYMBOL_RE = re.compile(r"^[A-Z]{1,5}(\.[A-Z])?$")
 
 REC_COLORS = {"buy": "green", "hold": "blue", "avoid": "red"}
-OUTCOME_COLORS = {"agree": "green", "critic": "orange", "abort": "red"}
+OUTCOME_COLORS = {"agree": "green", "critic": "orange", "abort": "red", "deferred": "violet"}
+
+
+# Trace reading lives with the logger (the scheduler uses it too).
+from agents.trace import read_trace, summarize_trace  # noqa: E402,F401
 
 
 def parse_symbols(text: str) -> tuple[list[str], list[str]]:
@@ -80,37 +81,6 @@ def load_user_env(
             os.environ[name] = value
             filled.append(name)
     return filled
-
-
-def read_trace(path: str | Path) -> list[dict[str, Any]]:
-    events = []
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                try:
-                    events.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue  # a line cut short by an interrupted run
-    return events
-
-
-def summarize_trace(events: list[dict[str, Any]], since: str | None = None) -> dict[str, Any]:
-    """LLM calls, tokens, failures and fallbacks, optionally only events at
-    or after the ISO timestamp `since` (a trace file holds a whole day)."""
-    if since is not None:
-        events = [e for e in events if e.get("ts", "") >= since]
-    responses = [e for e in events if e.get("event") == "llm_response"]
-    usage = [e.get("usage") or {} for e in responses]
-    return {
-        "llm_calls": len(responses),
-        "llm_errors": sum(e.get("event") == "llm_error" for e in events),
-        "fallbacks": sum(e.get("event") == "fallback" for e in events),
-        "prompt_tokens": sum(u.get("prompt_tokens") or 0 for u in usage),
-        "completion_tokens": sum(u.get("completion_tokens") or 0 for u in usage),
-        "total_tokens": sum(u.get("total_tokens") or 0 for u in usage),
-        "calls_by_model": dict(Counter(e.get("model", "?") for e in responses)),
-    }
 
 
 def event_row(event: dict[str, Any]) -> dict[str, Any]:

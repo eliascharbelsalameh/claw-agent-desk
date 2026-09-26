@@ -101,12 +101,21 @@ AGENT_MODELS = {
 # on one model per role. Only models that answered reliably that day are
 # listed. The two analysts' lists share no model, and agents also exclude,
 # at call time, any model that would break independence for that call (the
-# other analyst's model; the analysts' models for the critic), so a backup
-# that is fine in general is skipped when it would be checking its own work.
+# analysts' models for the critic and the bias agents), so a backup that is
+# fine in general is skipped when it would be checking its own work.
+#
+# The analysts have no backups (Sept 26, 2026): an analyst whose model can't
+# be reached defers the stock instead (agents/pipeline.py), because both
+# candidate backups judge differently from the primary they'd replace - on
+# the same 11 frozen contexts muse-glimmer said buy 0 times (0 of 34 across
+# all tests) and mistral-nemotron 6 of 9 against nemotron-3-super's 2 of 11.
+# A backup that behaves like its primary can be listed here again; the
+# pipeline only lets it answer after the primary has been down for
+# pipeline.ANALYST_BACKUP_AFTER.
 AGENT_MODEL_BACKUPS: dict[str, list[str]] = {
     "macro": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
-    "analyst_1": ["meta/muse-glimmer-30b"],
-    "analyst_2": ["mistralai/mistral-nemotron"],
+    "analyst_1": [],
+    "analyst_2": [],
     "critic": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
     "bias_1": ["mistralai/mistral-nemotron"],
     "bias_2": ["meta/muse-glimmer-30b"],

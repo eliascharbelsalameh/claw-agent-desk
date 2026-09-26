@@ -3,11 +3,11 @@ import json
 import pytest
 
 from agents.analyst_agent import AnalystVerdict
-from agents.cross_check import ABORT, AGREE, CRITIC, cross_check
+from agents.cross_check import ABORT, AGREE, CRITIC, DEFERRED, cross_check
 from agents.trace import TraceLogger
 
 
-def _v(role, rec, model=None, confidence=0.7, error=None, symbol="AAPL"):
+def _v(role, rec, model=None, confidence=0.7, error=None, symbol="AAPL", call_failed=False):
     return AnalystVerdict(
         symbol=symbol,
         role=role,
@@ -18,6 +18,7 @@ def _v(role, rec, model=None, confidence=0.7, error=None, symbol="AAPL"):
         thesis=None if error else "t",
         evidence_check={} if error else {"matches_source": 3},
         error=error,
+        call_failed=call_failed,
     )
 
 
@@ -86,3 +87,19 @@ def test_result_carries_both_verdicts_and_is_logged(tmp_path):
     record = json.loads(trace.path.read_text(encoding="utf-8").splitlines()[0])
     assert record["agent"] == "cross_check" and record["event"] == "decision"
     assert record["outcome"] == CRITIC and record["symbol"] == "AAPL"
+
+
+def test_unreachable_analyst_defers_instead_of_aborting():
+    down = _v("analyst_2", None, error="ConnectionError: dropped", call_failed=True)
+    result = cross_check(_v("analyst_1", "buy"), down)
+    assert result.outcome == DEFERRED and result.recommendation is None
+    assert "could not reach analyst_2 (lab-analyst_2/model)" in result.reason
+    assert "never counted as agreement" in result.reason
+    assert result.verdicts["analyst_2"]["call_failed"] is True
+
+
+def test_unusable_answer_aborts_even_when_the_other_is_unreachable():
+    down = _v("analyst_1", None, error="ConnectionError: dropped", call_failed=True)
+    unusable = _v("analyst_2", None, error="unparseable verdict: no JSON")
+    result = cross_check(down, unusable)
+    assert result.outcome == ABORT and "verdict failed for analyst_2" in result.reason

@@ -28,7 +28,7 @@ from typing import Any, Callable
 from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
 from .analyst_agent import EVIDENCE_STATUS_NOTE, HORIZON, AnalystVerdict, check_evidence
-from .llm_json import request_json
+from .llm_json import request_json, unreachable
 from .macro_agent import StockContext
 from .trace import TraceLogger
 
@@ -81,6 +81,10 @@ class Critique:
     # (including when the primary was excluded or skipped as cooling).
     primary_model: str | None = None
     error: str | None = None
+    # With `error` set: True when some candidate model could not be reached
+    # (a Build failure - the critic loop is deferred and retried next
+    # cycle), False when every model tried answered unusably (final).
+    call_failed: bool = False
 
     @property
     def ok(self) -> bool:
@@ -204,6 +208,9 @@ class CriticAgent:
         critique.fallbacks = reply.fallbacks
         if not reply.ok:
             critique.error = reply.error if reply.call_failed else f"unparseable critique: {reply.error}"
+            critique.call_failed = unreachable(reply)
+            self._log("critique_failed", {**base, "model": critique.model, "error": critique.error,
+                                          "call_failed": critique.call_failed})
             return critique
 
         critique.assessment = reply.value["assessment"]

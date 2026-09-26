@@ -9,10 +9,11 @@ from agents.critic_loop import (
     AGREED_BUY,
     MAX_ROUNDS,
     SPLIT,
+    CriticLoopResult,
     needs_critic,
     run_critic_loop,
 )
-from agents.cross_check import ABORT, AGREE, CRITIC, CrossCheckResult
+from agents.cross_check import ABORT, AGREE, CRITIC, DEFERRED, CrossCheckResult
 from agents.macro_agent import StockContext
 from agents.trace import TraceLogger
 
@@ -31,7 +32,7 @@ def _ctx():
     )
 
 
-def _verdict(role, rec, *, error=None, model=None, review_round=0, previous=None):
+def _verdict(role, rec, *, error=None, model=None, review_round=0, previous=None, call_failed=False):
     return AnalystVerdict(
         symbol="AAPL",
         role=role,
@@ -46,6 +47,7 @@ def _verdict(role, rec, *, error=None, model=None, review_round=0, previous=None
         review_round=review_round,
         previous_recommendation=previous,
         error=error,
+        call_failed=call_failed,
     )
 
 
@@ -192,8 +194,12 @@ def test_revise_refuses_failed_inputs():
 # --- loop ---
 
 class FakeCritic:
-    def __init__(self, fail_round=None):
+    """Fails in `fail_round`: unusably by default, or unreachable (a Build
+    failure) with unreachable=True."""
+
+    def __init__(self, fail_round=None, unreachable=False):
         self.fail_round = fail_round
+        self.unreachable = unreachable
         self.rounds = []
 
     def review(self, ctx, verdicts, review_round):
@@ -201,7 +207,8 @@ class FakeCritic:
         c = Critique(symbol=ctx.symbol, model="critic/model", review_round=review_round,
                      generated_at=NOW.isoformat())
         if review_round == self.fail_round:
-            c.error = "ConnectionError: dropped"
+            c.error = "ConnectionError: dropped" if self.unreachable else "unparseable critique: no JSON"
+            c.call_failed = self.unreachable
             return c
         c.assessment = f"round {review_round}"
         c.challenges = [{"to": "analyst_1", "point": "p1", "why": "w"}, {"to": "analyst_2", "point": "p2", "why": "w"}]
@@ -209,7 +216,8 @@ class FakeCritic:
 
 
 class FakeAnalyst:
-    """Re-votes from a script: one recommendation (or 'FAIL') per round."""
+    """Re-votes from a script: one recommendation per round, or 'FAIL' (an
+    unusable answer) or 'DOWN' (its model unreachable)."""
 
     def __init__(self, role, script):
         self.role = role
@@ -220,8 +228,11 @@ class FakeAnalyst:
         self.seen.append((review_round, own.recommendation, other.recommendation, len(challenges_to_me)))
         rec = self.script.pop(0)
         if rec == "FAIL":
-            return _verdict(self.role, None, error="ConnectionError: dropped", review_round=review_round,
+            return _verdict(self.role, None, error="unparseable verdict: no JSON", review_round=review_round,
                             previous=own.recommendation)
+        if rec == "DOWN":
+            return _verdict(self.role, None, error="ConnectionError: dropped", review_round=review_round,
+                            previous=own.recommendation, call_failed=True)
         return _verdict(self.role, rec, review_round=review_round, previous=own.recommendation)
 
 
@@ -291,6 +302,56 @@ def test_critic_failure_aborts():
     result, analysts, _ = _run(("buy", "buy"), [], [], critic=FakeCritic(fail_round=1), trigger=AGREED_BUY)
     assert result.outcome == ABORT and "critic failed in round 1" in result.reason
     assert analysts["analyst_1"].seen == []  # no re-votes without a critique
+    assert result.resume is None
+
+
+def test_unreachable_critic_defers_then_resumes_at_the_same_round(tmp_path):
+    trace = TraceLogger(tmp_path / "t.jsonl")
+    result, analysts, _ = _run(("buy", "hold"), ["hold"], ["hold"],
+                               critic=FakeCritic(fail_round=1, unreachable=True), trace=trace)
+    assert result.outcome == DEFERRED and result.recommendation is None
+    assert "critic could not be reached in round 1" in result.reason
+    assert result.resume["round"] == 1 and result.resume["critique"] is None
+    assert analysts["analyst_1"].seen == []
+
+    # next cycle: from the serialized result, as the scheduler stores it
+    stored = CriticLoopResult(**json.loads(json.dumps(result.to_dict())))
+    critic = FakeCritic()
+    resumed = run_critic_loop(_ctx(), {}, analysts, critic, "ignored", trace=trace, resume_from=stored)
+    assert resumed.outcome == AGREE and resumed.recommendation == "hold" and resumed.trigger == SPLIT
+    assert [r for r, _ in critic.rounds] == [1]
+    assert critic.rounds[0][1] == {"analyst_1": "buy", "analyst_2": "hold"}
+    events = [json.loads(l)["event"] for l in trace.path.read_text(encoding="utf-8").splitlines()
+              if json.loads(l)["agent"] == "critic_loop"]
+    assert events == ["start", "deferred", "resume", "round", "final"]
+
+
+def test_unreachable_revote_defers_keeping_the_critique_and_the_other_revote():
+    result, analysts, critic = _run(("buy", "hold"), ["DOWN", "hold"], ["hold"])
+    assert result.outcome == DEFERRED and "could not reach analyst_1" in result.reason
+    assert result.resume["critique"]["assessment"] == "round 1"
+    assert set(result.resume["revised"]) == {"analyst_2"}
+    assert result.rounds == []  # the round isn't complete yet
+
+    class NoCritic:
+        def review(self, *a, **k):
+            raise AssertionError("the round-1 critique is reused, not asked for again")
+
+    resumed = run_critic_loop(_ctx(), {}, analysts, NoCritic(), SPLIT, resume_from=result)
+    assert resumed.outcome == AGREE and resumed.recommendation == "hold"
+    assert len(analysts["analyst_1"].seen) == 2 and len(analysts["analyst_2"].seen) == 1
+    assert resumed.rounds[0]["critique"]["assessment"] == "round 1"
+
+
+def test_an_unusable_revote_aborts_even_if_the_other_is_unreachable():
+    result, _, _ = _run(("buy", "hold"), ["FAIL"], ["DOWN"])
+    assert result.outcome == ABORT and "verdict failed for analyst_1" in result.reason
+
+
+def test_only_a_deferred_loop_can_be_resumed():
+    done, analysts, critic = _run(("buy", "hold"), ["hold"], ["hold"])
+    with pytest.raises(ValueError, match="deferred"):
+        run_critic_loop(_ctx(), {}, analysts, critic, SPLIT, resume_from=done)
 
 
 def test_failed_revote_aborts():

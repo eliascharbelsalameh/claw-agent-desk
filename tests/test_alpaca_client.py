@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,3 +151,28 @@ def test_relative_volume_without_a_clock_uses_latest_bar_and_says_unknown(monkey
     monkeypatch.setattr(client, "get_clock", no_clock)
     result = client.get_relative_volume("AAPL", lookback_days=20)
     assert result["session_in_progress"] is None and result["relative_volume"] == pytest.approx(1.0)
+
+
+class _PagedSession:
+    """Two pages of bars, then no next_page_token."""
+
+    def __init__(self):
+        self.calls = []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append(kwargs["params"])
+        page = len(self.calls)
+        response = requests.Response()
+        response.status_code = 200
+        body = {"bars": [_bar(page, 1, 1, 1, 1, 1)], "next_page_token": "p2" if page == 1 else None}
+        response._content = json.dumps(body).encode()
+        return response
+
+
+def test_get_bars_asks_for_split_adjusted_bars_and_follows_pages():
+    session = _PagedSession()
+    client = AlpacaClient(settings=_settings(), session=session)
+    bars = client.get_bars("NFLX", timeframe="1Day", start=datetime(2025, 9, 1, tzinfo=timezone.utc))
+    assert len(bars) == 2
+    assert session.calls[0]["adjustment"] == "split" and session.calls[0]["feed"] == "iex"
+    assert "page_token" not in session.calls[0] and session.calls[1]["page_token"] == "p2"

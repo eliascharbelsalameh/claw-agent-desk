@@ -151,9 +151,22 @@ def test_every_candidate_failing_returns_the_last_error_and_all_fallbacks():
 
 # --- agents ---
 
-def test_analyst_records_the_backup_model_that_answered():
+def test_analyst_answers_only_on_its_primary_by_default():
+    # Decided Sept 26, 2026: an unreachable primary defers the stock instead
+    # of handing the verdict to a backup that judges differently.
     llm = RoutedLlm({"p": DEAD, "b": VERDICT})
     verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(_ctx())
+    assert not verdict.ok and verdict.call_failed and verdict.model == "p"
+    assert [m for m, _ in llm.calls] == ["p"]
+    unusable = AnalystAgent(RoutedLlm({"p": "no json here"}), "analyst_1", models=["p", "b"],
+                            health=ModelHealth()).analyze(_ctx())
+    assert not unusable.ok and not unusable.call_failed
+
+
+def test_analyst_records_the_backup_model_that_answered():
+    llm = RoutedLlm({"p": DEAD, "b": VERDICT})
+    verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(
+        _ctx(), allow_backup=True)
     assert verdict.ok and verdict.model == "b"
     assert verdict.fallbacks[0]["model"] == "p"
 
@@ -161,20 +174,31 @@ def test_analyst_records_the_backup_model_that_answered():
 def test_analyst_excludes_the_model_the_other_analyst_used():
     llm = RoutedLlm({"b": VERDICT})
     verdict = AnalystAgent(llm, "analyst_2", models=["p", "b"], health=ModelHealth()).analyze(
-        _ctx(), exclude={"p"})
+        _ctx(), exclude={"p"}, allow_backup=True)
     assert verdict.model == "b" and [m for m, _ in llm.calls] == ["b"]
 
 
-def test_revise_prefers_the_model_that_wrote_the_verdict_and_never_the_other_analysts():
+def _verdicts_for_revise(own_model="b", other_model="x"):
+    own = AnalystVerdict(symbol="AAPL", role="analyst_1", model=own_model, generated_at="t", recommendation="buy",
+                         confidence=0.7, thesis="t", drivers=["d"], risks=["r"])
+    other = AnalystVerdict(symbol="AAPL", role="analyst_2", model=other_model, generated_at="t",
+                           recommendation="hold", confidence=0.6, thesis="t", drivers=["d"], risks=["r"])
+    return own, other
+
+
+def test_revise_runs_only_on_the_model_that_wrote_the_verdict():
     llm = RoutedLlm({"b": VERDICT})
     agent = AnalystAgent(llm, "analyst_1", models=["p", "b", "x"], health=ModelHealth())
-    own = AnalystVerdict(symbol="AAPL", role="analyst_1", model="b", generated_at="t", recommendation="buy",
-                         confidence=0.7, thesis="t", drivers=["d"], risks=["r"])
-    other = AnalystVerdict(symbol="AAPL", role="analyst_2", model="x", generated_at="t", recommendation="hold",
-                           confidence=0.6, thesis="t", drivers=["d"], risks=["r"])
+    own, other = _verdicts_for_revise()
     revised = agent.revise(_ctx(), own, other, assessment="a", challenges_to_me=[],
                            challenges_to_other=[], review_round=1)
     assert revised.model == "b" and [m for m, _ in llm.calls] == ["b"]
+    # if that model is down the re-vote fails as unreachable - no other model steps in
+    llm = RoutedLlm({"b": DEAD, "p": VERDICT})
+    agent = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth())
+    revised = agent.revise(_ctx(), own, other, assessment="a", challenges_to_me=[],
+                           challenges_to_other=[], review_round=1)
+    assert not revised.ok and revised.call_failed and [m for m, _ in llm.calls] == ["b"]
 
 
 def test_critic_never_runs_on_an_analysts_model():
@@ -223,7 +247,7 @@ def test_primary_skipped_as_cooling_still_shows_as_backup_use():
     health = ModelHealth()
     health.record_failure("p")
     llm.behaviour["p"] = DEAD
-    verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=health).analyze(_ctx())
+    verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=health).analyze(_ctx(), allow_backup=True)
     assert verdict.model == "b" and verdict.primary_model == "p"
     assert verdict.fallbacks == [] and verdict.used_backup
     ok = AnalystAgent(RoutedLlm({"p": VERDICT}), "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(_ctx())
