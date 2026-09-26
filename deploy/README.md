@@ -67,7 +67,7 @@ never placed twice.
 ## 5. Watch it
 
 The Streamlit app reads the same state and traces. Run it on the server and reach it through an
-SSH tunnel. Never open port 8501 to the internet: the app can spend Build credits, and its trace
+SSH tunnel. Never open port 8501 to the internet: the app makes Build calls on your key, and its trace
 viewer shows everything the agents saw.
 
 ```bash

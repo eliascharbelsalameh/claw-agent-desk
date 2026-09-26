@@ -210,7 +210,7 @@ class DeskPipeline:
     ) -> DeskPipeline:
         """The live desk: real data clients (sharing one on-disk cache) and,
         unless use_llm is False, the LLM agents with their default models and
-        backups. use_llm=False is data only - no Build credits spent."""
+        backups. use_llm=False is data only - no LLM calls."""
         settings = settings or get_settings()
         cache = DiskCache(settings.cache_dir)
         llm = LlmClient(settings=settings) if use_llm else None

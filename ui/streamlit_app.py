@@ -5,7 +5,7 @@
 Runs the same DeskPipeline as the CLI (agents/pipeline.py) and shows every
 stage: the context each stock got, both analysts' verdicts with their
 checked evidence, the cross-check, and each critic-loop round. The trace
-viewer replays any past run from its JSONL trace without spending credits.
+viewer replays any past run from its JSONL trace without any LLM call.
 """
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ from data_layer.llm_client import AGENT_MODELS, DEFAULT_MODEL_HEALTH, role_model
 
 LOG_DIR = Path(os.environ.get("CLAW_DESK_LOG_DIR", REPO_ROOT / "logs"))
 STATE_PATH = Path(os.environ.get("CLAW_DESK_STATE", REPO_ROOT / "state" / "desk_state.json"))
-FULL, DATA_ONLY = "Full desk", "Data only (no Build credits)"
+FULL, DATA_ONLY = "Full desk", "Data only (no LLM calls)"
 
 st.set_page_config(page_title="Claw Agent Desk", layout="wide")
 

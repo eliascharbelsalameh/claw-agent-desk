@@ -74,10 +74,10 @@ Use the NVIDIA Build endpoints (`https://integrate.api.nvidia.com/v1`, OpenAI-co
 - **Gateway 60s idle cutoff (found Sept 25, 2026):** Build closes any connection that sends no bytes for 60s, so non-streaming calls to reasoning models fail at exactly 60s. `llm_client.py` now streams by default. Streams also drop mid-response under load, and output from a degraded backend can turn into degenerate text, so agents retry and validate what they forward.
 - **Thinking can be switched off on Nemotron models** via `chat_template_kwargs={"enable_thinking": false}`. The macro/context role uses it: with thinking on, the macro model spent its full 4,096-token budget reasoning (inside `content`) without producing a briefing; with it off, the same prompt returned a complete briefing in ~20–40s.
 - **Free/trial tier limits:** confirmed ~40 requests/minute on the account checked (Sept 2026). Per-model limits for the others above aren't shown anywhere in the dashboard, so `llm_client.py` applies the same 40 RPM budget to every model by default (`DEFAULT_RPM_LIMIT`, overridable per model) as a conservative assumption, paced client-side on top of the existing 429 retry/backoff.
-- **Credits, separate from RPM:** trial accounts get ~1,000 inference credits on signup (personal email), up to ~5,000 with a business email / "Request More". Credits deduct per call regardless of RPM headroom — a multi-day continuous run could exhaust credits before hitting any rate ceiling. Not yet measured against real usage.
+- **Credits:** ~~trial accounts get ~1,000 inference credits on signup, up to ~5,000~~ — not confirmed. On Sept 26, 2026, build.nvidia.com showed this account only the 40 RPM rate limit, with no credit balance anywhere, and the API returns no credit information. Treat RPM (and Build's reliability) as the only limits; quota refusals, if they ever come, show up as call failures (deferrals) in the trace.
 - **Estimated load:** a few dozen LLM calls per stock cycle, well under 40 RPM unless loops get chatty.
 - **Must have:** retry with backoff on HTTP 429 in every LLM call — done, `llm_client.py` calls go through the same `http_utils.request_with_retry` as every other data-layer client.
-- **To check:** how credits are consumed over a multi-day run (Build dashboard) — no data yet since no live run has started.
+- **Measured usage (Sept 26):** a live decision cycle used ~5 LLM calls and ~61k tokens per stock (context briefing, both analysts, a critic round, the bias gate); a full 11-stock day is about 45–60 calls.
 - **Self-hosting:** not realistic on Oracle A1 (no GPU), so the endpoints are the route.
 
 ## 5. Data sources (US stocks only)
@@ -146,4 +146,4 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 - ~~Final list of the three stocks?~~ The scheduler's default watchlist is the 11 liquid large caps the desk was tested on (AAPL MSFT NVDA AMD META INTC CVX NFLX NKE MRK ADBE); the desk rarely agrees on a buy, so a wider list gives the demo a better chance of showing trades.
 - Is FT content usable programmatically, and is Barron's worth buying?
 - Demo output: per-stock reasoning trail, multi-day log, or both?
-- How Build credits get consumed over a multi-day run.
+- ~~How Build credits get consumed over a multi-day run.~~ No credit balance exists for this account as far as build.nvidia.com shows (Sept 26); only the 40 RPM limit.

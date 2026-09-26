@@ -1,7 +1,7 @@
 """Run the macro/context agent, optionally followed by analysts, against live APIs.
 
     .venv/Scripts/python -m agents AAPL MSFT NVDA
-    .venv/Scripts/python -m agents AAPL --no-llm                 # data only, no Build credits
+    .venv/Scripts/python -m agents AAPL --no-llm                 # data only, no LLM calls
     .venv/Scripts/python -m agents AAPL --analysts analyst_1     # context + one analyst
     .venv/Scripts/python -m agents AAPL --analysts analyst_1 analyst_2
     .venv/Scripts/python -m agents AAPL --analysts analyst_1 analyst_2 --no-critic

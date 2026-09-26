@@ -64,7 +64,7 @@ def test_full_run_shows_every_stage(app):
 
 def test_data_only_run_needs_no_nvidia_key_and_makes_no_decision(app, monkeypatch):
     monkeypatch.delenv("NVIDIA_API_KEY")
-    at = _run(app, symbols="AAPL", mode="Data only (no Build credits)")
+    at = _run(app, symbols="AAPL", mode="Data only (no LLM calls)")
     assert list(at.dataframe[0].value["final"]) == ["data only"]
 
 
