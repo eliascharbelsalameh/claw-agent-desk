@@ -19,9 +19,9 @@ model (or every critic candidate) can't be reached, the stock comes out
 up at the failed step - the scheduler does that on its next cycle. Each
 analyst answers on its own primary model; its backups are allowed only after
 the primary has been down for ANALYST_BACKUP_AFTER (tracked in
-ModelOutages, which the scheduler keeps across cycles). At the bias gate,
-once bias_2 has been unreachable on a stock for BIAS_SOLO_AFTER, bias_1
-decides alone (bias_agent.py).
+ModelOutages, which the scheduler keeps across cycles). At the bias gate a
+bias_1 pass clears the buy at once, and once bias_2 has been unreachable on
+a stock for BIAS_SOLO_AFTER a bias_1 flag vetoes it alone (bias_agent.py).
 
 Nothing here decides anything itself - it only sequences the agents and
 passes each one what the previous stage produced.

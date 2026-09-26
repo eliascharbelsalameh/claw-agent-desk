@@ -110,9 +110,8 @@ class UnreachableBias(FakeBias):
                          error="ConnectionError: dropped", call_failed=True)
 
 
-def test_bias_1_decides_alone_after_hours_without_bias_2(tmp_path):
-    broker = FakeBroker()
-    box = {"clock": PRE_MARKET, "now": T0}
+def _bias_2_down_scheduler(tmp_path, broker, box):
+    """Watches MSFT (an agreed buy); bias_2 can never be reached."""
 
     def factory(trace, outages):
         analysts = {r: ScriptedAnalyst(None, r) for r in ("analyst_1", "analyst_2")}
@@ -120,30 +119,46 @@ def test_bias_1_decides_alone_after_hours_without_bias_2(tmp_path):
         return DeskPipeline(PricedMacro(), analysts=analysts, critic=FakeCritic(None), bias_agents=bias,
                             trace=trace, outages=outages, now=lambda: box["now"])
 
-    def scheduler():
-        return DeskScheduler(broker=broker, pipeline_factory=factory, state_path=tmp_path / "state.json",
-                             log_dir=tmp_path / "logs", watchlist=("MSFT",), dry_run=False,
-                             now=lambda: box["now"])
-
     broker.get_clock = lambda: box["clock"]
-    sched = scheduler()
+    return DeskScheduler(broker=broker, pipeline_factory=factory, state_path=tmp_path / "state.json",
+                         log_dir=tmp_path / "logs", watchlist=("MSFT",), dry_run=False, now=lambda: box["now"])
+
+
+def test_a_bias_1_pass_buys_at_once_even_with_bias_2_down(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _bias_2_down_scheduler(tmp_path, broker, box)
     assert sched.tick() == DECISION
-    assert set(sched.state.pending) == {"MSFT"} and broker.submitted == []
-    assert sched.state.pending["MSFT"]["reason"] == (
-        "could not reach bias_2: a Build failure, retried next pass; "
-        "bias_1 decides alone if bias_2 is still unreachable at 14:05 UTC")
-
-    box["clock"], box["now"] = MIDDAY, T0 + RETRY_EVERY
-    assert sched.tick() == RETRY and set(sched.state.pending) == {"MSFT"}
-
-    # after a restart (the wait's start comes back from the state file)
-    box["now"] = T0 + BIAS_SOLO_AFTER
-    restarted = scheduler()
-    assert restarted.tick() == RETRY
-    assert restarted.state.pending == {}
+    assert sched.state.pending == {}
     assert broker.submitted == [("MSFT", 98, "buy", "desk-2026-09-28-MSFT-buy")]
+    assert "bias_1 passes it, which clears the gate" in sched.state.decisions[-1]["gates"][0]["reason"]
+
+
+def test_a_bias_1_flag_vetoes_alone_after_hours_without_bias_2(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    FakeBias.flag = {"MSFT"}
+    try:
+        sched = _bias_2_down_scheduler(tmp_path, broker, box)
+        assert sched.tick() == DECISION
+        assert set(sched.state.pending) == {"MSFT"}
+        assert sched.state.pending["MSFT"]["reason"] == (
+            "could not reach bias_2: a Build failure, retried next pass; "
+            "bias_1's flag vetoes the buy alone if bias_2 is still unreachable at 14:05 UTC")
+
+        box["clock"], box["now"] = MIDDAY, T0 + RETRY_EVERY
+        assert sched.tick() == RETRY and set(sched.state.pending) == {"MSFT"}
+
+        # after a restart (the wait's start comes back from the state file)
+        box["now"] = T0 + BIAS_SOLO_AFTER
+        restarted = _bias_2_down_scheduler(tmp_path, broker, box)
+        assert restarted.tick() == RETRY
+    finally:
+        FakeBias.flag = set()
+    assert restarted.state.pending == {} and broker.submitted == []
     gate = restarted.state.decisions[-1]["gates"][0]
-    assert gate["passed"] and "bias_2 could not be reached for 2h 00m (since 12:05 UTC)" in gate["reason"]
+    assert not gate["passed"]
+    assert "bias_2 could not be reached for 2h 00m (since 12:05 UTC), so bias_1 decides alone" in gate["reason"]
 
 
 def test_restart_keeps_the_days_work(tmp_path):

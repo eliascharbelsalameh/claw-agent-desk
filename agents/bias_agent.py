@@ -10,18 +10,20 @@ paid feature, spec section 5), three named checks, and pass or flag.
 Like the critic, a bias agent never recommends anything: it says whether
 the buy case rests on skewed inputs. The gate (bias_gate) vetoes a buy only
 when BOTH agents flag it, mirroring the strict two-analyst match - no single
-model's weakness decides (spec section 1), neither a pass nor a veto. A
-single flag is kept in the decision's record. An agent that can't be
-reached defers the stock (retried like any Build failure); an unusable
-answer fails the gate, because a check that couldn't be done is not a pass.
+model's weakness decides a veto (spec section 1). A single flag is kept in
+the decision's record. An agent that can't be reached defers the stock
+(retried like any Build failure); an unusable answer fails the gate,
+because a check that couldn't be done is not a pass.
 
-Decided Sept 26, 2026: once bias_2 has been unreachable on a stock for
-BIAS_SOLO_AFTER - every attempt for that stock failed since - bias_1
-decides alone: its pass lets the buy through and its flag vetoes it (so
-here a single flag is enough). In the Sept 26 dry run four agreed buys
-waited all afternoon on bias_2, whose only eligible model (mistral-nemotron)
-failed 61% of its calls that day. It only works this way round: an
-unreachable bias_1 still defers the stock.
+Decided Sept 26, 2026, so a buy never waits all session on one model:
+- bias_1 goes first, and its pass clears the gate at once: without its
+  flag no veto is possible, so bias_2 is asked only when bias_1 flags (or
+  can't be reached - then bias_2's check is kept for the retry).
+- Once bias_2 has been unreachable on a stock for BIAS_SOLO_AFTER - every
+  attempt for that stock failed since - bias_1's flag vetoes the buy alone.
+  In the Sept 26 dry run four agreed buys waited all afternoon on bias_2,
+  whose only eligible model (mistral-nemotron) failed 61% of its calls that
+  day. Not the other way round: an unreachable bias_1 still defers.
 
 Runtime independence: each bias agent excludes the models the analysts
 actually used, and bias_2 also excludes the model bias_1 ran on.
@@ -48,9 +50,9 @@ CHECKS = ("news_driven", "stale_news", "trend_chasing")
 
 PASSED, VETOED, FAILED, DEFERRED = "passed", "vetoed", "failed", "deferred"
 
-# The agent that may decide alone, and after how long the other one's
-# outage on a stock (see the module docstring).
-SOLO_ROLE = "bias_1"
+# The agent whose pass clears the gate and whose flag vetoes alone once
+# the other has been unreachable on a stock this long (module docstring).
+LEAD_ROLE = "bias_1"
 BIAS_SOLO_AFTER = timedelta(hours=2)
 
 SYSTEM_PROMPT = f"""You are a bias and sentiment checker on an equity research desk. Two analysts, on different models, independently read the same context packet for one US stock and both recommend buying it for a long-only portfolio of real shares over {HORIZON}; a critic has already challenged their reasoning. Your job is narrower: check whether this buy rests on skewed inputs rather than on the evidence. You do not decide whether to buy and you give no recommendation.
@@ -219,7 +221,7 @@ class BiasGateResult:
     # Role -> when this stock's first attempt to reach it failed (UTC, ISO),
     # kept while every retry fails: what BIAS_SOLO_AFTER is measured from.
     unreachable_since: dict[str, str] = field(default_factory=dict)
-    # SOLO_ROLE decided alone (the other agent unreachable for BIAS_SOLO_AFTER).
+    # LEAD_ROLE's flag vetoed alone (the other agent unreachable for BIAS_SOLO_AFTER).
     solo: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -247,18 +249,20 @@ def bias_gate(
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> BiasGateResult:
     """Run the bias agents in role order (each after the previous, so it
-    can exclude the model that one used). With `previous` - a deferred
-    result - checks that already came back are kept and only the others
-    are asked again. solo_after=None never lets SOLO_ROLE decide alone."""
+    can exclude the model that one used), stopping at a LEAD_ROLE pass.
+    With `previous` - a deferred result - checks that already came back
+    are kept and only the others are asked again. solo_after=None never
+    lets LEAD_ROLE's flag veto alone."""
     kept = {role: BiasCheck(**d) for role, d in (previous.checks if previous else {}).items()
             if d.get("error") is None}
     checks: dict[str, BiasCheck] = {}
     for role in sorted(agents):
+        lead = checks.get(LEAD_ROLE)
         if role in kept:
             checks[role] = kept[role]
-            continue
-        used = {c.model for c in (*kept.values(), *checks.values()) if c.ok}
-        checks[role] = agents[role].review(ctx, verdicts, exclude=used)
+        elif lead is None or not lead.ok or lead.flagged:
+            used = {c.model for c in (*kept.values(), *checks.values()) if c.ok}
+            checks[role] = agents[role].review(ctx, verdicts, exclude=used)
 
     records = {role: c.to_dict() for role, c in checks.items()}
     unusable = [r for r, c in checks.items() if not c.ok and not c.call_failed]
@@ -267,27 +271,31 @@ def bias_gate(
     at = now()
     earlier = previous.unreachable_since if previous else {}
     since = {r: earlier.get(r) or at.isoformat() for r in unreached}
-    # SOLO_ROLE's check stands alone only when it came back and every other
-    # agent is unreachable, counted from the latest of their first failures.
-    solo_check = checks.get(SOLO_ROLE)
-    alone = (solo_after is not None and solo_check is not None and solo_check.ok
+    lead = checks.get(LEAD_ROLE)
+    cleared = lead is not None and lead.ok and not lead.flagged
+    # LEAD_ROLE's flag stands alone only when every other agent is
+    # unreachable, counted from the latest of their first failures.
+    alone = (solo_after is not None and lead is not None and lead.ok and lead.flagged
              and bool(unreached) and len(unreached) == len(checks) - 1)
     start = max((datetime.fromisoformat(s) for s in since.values()), default=at)
     solo = alone and at - start >= solo_after
     absent = ", ".join(unreached)
     if unusable:
         outcome, reason = FAILED, f"bias check unusable from {', '.join(unusable)}; a check that couldn't be done is not a pass"
+    elif cleared:
+        outcome = PASSED
+        reason = f"passed: {LEAD_ROLE} passes it, which clears the gate (a veto needs both bias agents)"
+        if flags:  # a check kept from an attempt where LEAD_ROLE couldn't be reached
+            reason += f"; only {flags[0]} flags it ({checks[flags[0]].reason})"
     elif solo:
-        why = (f"{absent} could not be reached for {_duration(at - start)} (since {start:%H:%M} UTC), "
-               f"so {SOLO_ROLE} decides alone")
-        if solo_check.flagged:
-            outcome, reason = VETOED, f"{why} and flags the buy: {solo_check.reason}"
-        else:
-            outcome, reason = PASSED, f"passed: {why} and passes it"
+        outcome = VETOED
+        reason = (f"{absent} could not be reached for {_duration(at - start)} (since {start:%H:%M} UTC), "
+                  f"so {LEAD_ROLE} decides alone and flags the buy: {lead.reason}")
     elif unreached:
         outcome, reason = DEFERRED, f"could not reach {absent}: a Build failure, retried next pass"
         if alone:
-            reason += f"; {SOLO_ROLE} decides alone if {absent} is still unreachable at {start + solo_after:%H:%M} UTC"
+            reason += (f"; {LEAD_ROLE}'s flag vetoes the buy alone if {absent} is still unreachable "
+                       f"at {start + solo_after:%H:%M} UTC")
     elif len(flags) == len(checks):
         outcome = VETOED
         reason = "both bias agents flag the buy: " + " | ".join(f"{r}: {checks[r].reason}" for r in flags)

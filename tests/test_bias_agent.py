@@ -110,9 +110,12 @@ def _gate(r1, r2, previous=None, agents=None, at=T0, solo_after=BIAS_SOLO_AFTER)
 
 @pytest.mark.parametrize("r1, r2, outcome", [
     ("pass", "pass", PASSED),
+    ("pass", "DOWN", PASSED),     # a bias_1 pass clears the gate: bias_2 isn't asked
     ("flag", "pass", PASSED),     # one flag is recorded, but a veto needs both
     ("flag", "flag", VETOED),
-    ("GARBLED", "pass", FAILED),  # a check that couldn't be done is not a pass
+    ("flag", "DOWN", DEFERRED),
+    ("flag", "GARBLED", FAILED),  # a check that couldn't be done is not a pass
+    ("GARBLED", "pass", FAILED),
     ("DOWN", "pass", DEFERRED),
     ("GARBLED", "DOWN", FAILED),  # unusable is final, retrying the other can't help
 ])
@@ -128,8 +131,24 @@ def test_single_flag_is_kept_in_the_reason():
 
 
 def test_bias_2_excludes_the_model_bias_1_used():
-    _, agents = _gate(["pass"], ["pass"])
+    _, agents = _gate(["flag"], ["pass"])
     assert agents["bias_2"].excludes == [{"bias_1/m"}]
+
+
+def test_a_bias_1_pass_clears_the_gate_without_asking_bias_2():
+    result, agents = _gate(["pass"], ["DOWN"])
+    assert result.outcome == PASSED and not result.solo and result.unreachable_since == {}
+    assert result.reason == "passed: bias_1 passes it, which clears the gate (a veto needs both bias agents)"
+    assert set(result.checks) == {"bias_1"} and agents["bias_2"].excludes == []
+
+
+def test_a_late_bias_1_pass_keeps_bias_2s_earlier_flag_in_the_record():
+    first, agents = _gate(["DOWN", "pass"], ["flag"])  # bias_2 is asked while bias_1 is down
+    assert first.outcome == DEFERRED
+    second, _ = _gate(None, None, previous=first, agents=agents)
+    assert second.outcome == PASSED and set(second.checks) == {"bias_1", "bias_2"}
+    assert second.reason.endswith("; only bias_2 flags it (bias_2 says flag)")
+    assert agents["bias_2"].excludes == [set()]  # asked once only
 
 
 def test_deferred_gate_resumes_keeping_the_check_that_came_back():
@@ -140,14 +159,13 @@ def test_deferred_gate_resumes_keeping_the_check_that_came_back():
     assert len(agents["bias_2"].results) == 0 and agents["bias_2"].excludes == [set()]  # asked once only
 
 
-# --- bias_1 alone after a long bias_2 outage (decided Sept 26, 2026) ---
+# --- a bias_1 flag vetoes alone after a long bias_2 outage (decided Sept 26, 2026) ---
 
-@pytest.mark.parametrize("r1, outcome", [("pass", PASSED), ("flag", VETOED)])
-def test_bias_1_decides_alone_once_bias_2_has_been_unreachable_long_enough(r1, outcome):
-    first, agents = _gate([r1], ["DOWN", "DOWN", "DOWN"])
+def test_bias_1_flag_vetoes_alone_once_bias_2_has_been_unreachable_long_enough():
+    first, agents = _gate(["flag"], ["DOWN", "DOWN", "DOWN"])
     assert first.outcome == DEFERRED and not first.solo
     assert first.unreachable_since == {"bias_2": T0.isoformat()}
-    assert "bias_1 decides alone if bias_2 is still unreachable at 14:30 UTC" in first.reason
+    assert first.reason.endswith("; bias_1's flag vetoes the buy alone if bias_2 is still unreachable at 14:30 UTC")
 
     # a retry just short of BIAS_SOLO_AFTER still waits, and the wait keeps its start
     almost = T0 + BIAS_SOLO_AFTER - timedelta(minutes=1)
@@ -155,8 +173,9 @@ def test_bias_1_decides_alone_once_bias_2_has_been_unreachable_long_enough(r1, o
     assert second.outcome == DEFERRED and second.unreachable_since == first.unreachable_since
 
     third, _ = _gate(None, None, previous=second, agents=agents, at=T0 + BIAS_SOLO_AFTER)
-    assert third.outcome == outcome and third.solo and third.gate["passed"] is (outcome == PASSED)
-    assert "bias_2 could not be reached for 2h 00m (since 12:30 UTC), so bias_1 decides alone" in third.reason
+    assert third.outcome == VETOED and third.solo and third.gate["passed"] is False
+    assert third.reason == ("bias_2 could not be reached for 2h 00m (since 12:30 UTC), so bias_1 decides alone "
+                            "and flags the buy: bias_1 says flag")
     assert agents["bias_1"].excludes == [set()]  # asked once: its check was kept
     assert agents["bias_2"].results == []        # asked on every pass
 
@@ -178,16 +197,16 @@ def test_bias_2_answering_late_brings_back_the_two_agent_rule():
 
 def test_bias_2_never_decides_alone():
     first, agents = _gate(["DOWN", "DOWN"], ["flag"])
-    assert first.outcome == DEFERRED and "decides alone" not in first.reason
+    assert first.outcome == DEFERRED and "alone" not in first.reason
     later, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=5))
     assert later.outcome == DEFERRED and not later.solo
     assert later.unreachable_since == {"bias_1": T0.isoformat()}
 
 
 def test_solo_rule_off_keeps_waiting():
-    first, agents = _gate(["pass"], ["DOWN", "DOWN"], solo_after=None)
+    first, agents = _gate(["flag"], ["DOWN", "DOWN"], solo_after=None)
     later, _ = _gate(None, None, previous=first, agents=agents, at=T0 + timedelta(hours=5), solo_after=None)
-    assert later.outcome == DEFERRED and not later.solo and "decides alone" not in later.reason
+    assert later.outcome == DEFERRED and not later.solo and "alone" not in later.reason
 
 
 def test_pipeline_runs_the_gate_only_on_agreed_buys_and_decisions_carry_it():

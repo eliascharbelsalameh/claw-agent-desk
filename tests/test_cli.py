@@ -29,7 +29,8 @@ def test_full_pipeline_prints_cross_check_and_critic_loop(run_cli):
     assert "critic [critic/m]: AAPL critique" in out
     assert "MSFT cross-check: AGREE (buy)" in out
     assert "MSFT critic loop (agreed_buy): AGREE (buy)" in out
-    assert "MSFT bias gate: PASSED - passed: neither bias agent flags the buy" in out
+    assert ("MSFT bias gate: PASSED - passed: bias_1 passes it, which clears the gate "
+            "(a veto needs both bias agents)") in out
     assert "MSFT technical [tech/m]: ENTER - MSFT clean entry (4h trend up, support 90.0, resistance 110.0)" in out
     assert "NVDA bias gate" not in out and "AAPL bias gate" not in out  # agreed buys only
     assert "NVDA cross-check: AGREE (hold)" in out
