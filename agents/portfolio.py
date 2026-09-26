@@ -7,7 +7,7 @@ Rules:
   leverage - decided Sept 25, 2026).
 - A position the desk opened is sold when the desk agrees on "avoid" for
   it, or when the horizon it was bought for has run out: HOLDING_SESSIONS
-  trading sessions after entry, matching the analysts' 2-5 trading-day
+  trading sessions after entry, inside the analysts' 2-5 trading-day
   horizon. An agreed "buy" for a stock already held starts a fresh horizon
   instead of adding shares.
 - Everything else - hold, abort, deferred, a split the critic loop didn't
@@ -36,7 +36,10 @@ AGENT_NAME = "portfolio"
 
 POSITION_FRACTION = 0.10
 MAX_POSITIONS = 8
-HOLDING_SESSIONS = 5
+# Decided Sept 26, 2026: 3 sessions (inside the analysts' 2-5 day horizon),
+# so a position opened on the first day of the demo run is also closed
+# before the Oct 2 deadline - bought at Monday's open, sold at Thursday's.
+HOLDING_SESSIONS = 3
 # Orders are sized on the last close but fill at the next open: keep a
 # margin so a gap up doesn't push the order past the cash available.
 PRICE_BUFFER = 1.02

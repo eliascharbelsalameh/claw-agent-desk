@@ -3,6 +3,8 @@ from datetime import date
 import pytest
 
 from agents.computed_facts import (
+    NET_INCOME_CONCEPTS,
+    REVENUE_CONCEPTS,
     atr,
     best_ttm,
     compute_technicals,
@@ -139,7 +141,7 @@ def test_valuation_without_price_or_share_count():
     valuation, gaps = compute_valuation(facts, PRICE)
     assert valuation["market_cap"] is None and valuation["ps_ttm"] is None
     assert valuation["pe_ttm"] == round(200 / 8.72, 2)
-    assert gaps == ["valuation: no diluted share count in the filings, so no market cap or price-to-sales"]
+    assert gaps == ["valuation: no usable diluted share count in the filings, so no market cap or price-to-sales"]
 
 
 def test_valuation_with_nothing_computable():
@@ -241,3 +243,41 @@ def test_summarize_earnings_empty_and_unknown_hour():
     assert out["next_report"] is None and out["latest_report"] is None
     row = {"date": "2026-09-26", "hour": "", "epsEstimate": None, "epsActual": None}
     assert summarize_earnings([row], date(2026, 9, 26))["next_report"]["time"] == "not specified"
+
+
+def test_stale_trailing_figures_are_not_used():
+    # NEE, live: its Revenues tag stops in 2013; valuing today's price on it
+    # would have produced a price-to-sales of 10.7.
+    old_revenue = [dict(e, start=e["start"].replace("202", "201"), end=e["end"].replace("202", "201"),
+                        val=e["val"] * 10) for e in _full_facts()["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]]
+    facts = _full_facts()
+    facts["facts"]["us-gaap"]["Revenues"]["units"]["USD"] = old_revenue
+    valuation, gaps = compute_valuation(facts, PRICE)
+    assert valuation["ps_ttm"] is None and "revenue" not in valuation["trailing_12m"]
+    assert gaps == ["valuation: latest TTM revenue ends 2016-06-27 (stale) - not used"]
+    assert valuation["pe_ttm"] == round(200 / 8.72, 2)  # the fresh figures still count
+
+
+def test_mis_scaled_share_count_is_replaced_by_net_income_over_eps():
+    # MCD, live: 712.3 "shares" filed for ~712 million.
+    facts = _full_facts()
+    facts["facts"]["us-gaap"]["WeightedAverageNumberOfDilutedSharesOutstanding"]["units"]["shares"] = [
+        _e("2026-03-29", "2026-06-27", 1000.0)]
+    valuation, gaps = compute_valuation(facts, PRICE)
+    assert gaps == [] and valuation["diluted_shares"] == 1_000_000_000  # 8.72e9 / 8.72
+    assert valuation["market_cap"] == 200_000_000_000
+    assert "disagrees with net income / EPS" in valuation["diluted_shares_note"]
+
+
+def test_bank_and_utility_revenue_tags_and_newer_net_income_tag():
+    flow = [dict(e, val=e["val"] * 1_000_000_000) for e in AAPL_EPS]
+    for tag in ("RevenuesNetOfInterestExpense", "RegulatedAndUnregulatedOperatingRevenue"):
+        ttm = best_ttm(_facts(**{tag: flow}), REVENUE_CONCEPTS)
+        assert ttm["concept"] == tag and ttm["value"] == pytest.approx(8.72e9)
+    # CAT, live: NetIncomeLoss stops in 2011, the current figure is "available to common"
+    stale = [_e("2010-01-01", "2010-12-31", 1, form="10-K", filed="2011-02-01")]
+    facts = _facts(NetIncomeLoss=stale, NetIncomeLossAvailableToCommonStockholdersBasic=flow)
+    assert best_ttm(facts, NET_INCOME_CONCEPTS)["concept"] == "NetIncomeLossAvailableToCommonStockholdersBasic"
+    # on a tie the earlier candidate wins
+    tie = _facts(NetIncomeLoss=flow, ProfitLoss=flow)
+    assert best_ttm(tie, NET_INCOME_CONCEPTS)["concept"] == "NetIncomeLoss"

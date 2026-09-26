@@ -546,3 +546,19 @@ def test_unreadable_clock_is_a_data_gap_for_every_stock():
     for ctx in contexts.values():
         assert any(g.startswith("market clock:") for g in ctx.data_gaps)
         assert ctx.price["latest_bar_in_progress"] is False
+
+
+def test_fundamentals_read_the_newer_cash_tag_and_prefer_netincomeloss_on_a_tie():
+    facts = {"facts": {"us-gaap": {
+        "CashAndCashEquivalentsAtCarryingValue": {"units": {"USD": [
+            {"end": "2018-12-31", "val": 1, "form": "10-K", "filed": "2019-02-01"}]}},
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents": {"units": {"USD": [
+            {"end": "2026-06-30", "val": 310, "form": "10-Q", "filed": "2026-08-01"}]}},
+        "NetIncomeLoss": {"units": {"USD": [
+            {"start": "2026-04-01", "end": "2026-06-30", "val": 37, "form": "10-Q", "filed": "2026-08-01"}]}},
+        "NetIncomeLossAvailableToCommonStockholdersBasic": {"units": {"USD": [
+            {"start": "2026-04-01", "end": "2026-06-30", "val": 36, "form": "10-Q", "filed": "2026-08-02"}]}},
+    }}}
+    out = extract_fundamentals(facts)
+    assert out["cash"]["value"] == 310 and out["cash"]["period_end"] == "2026-06-30"
+    assert out["net_income"]["concept"] == "NetIncomeLoss" and out["net_income"]["value"] == 37

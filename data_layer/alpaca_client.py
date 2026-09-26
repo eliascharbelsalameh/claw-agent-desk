@@ -261,3 +261,14 @@ class AlpacaClient(BaseClient):
     def get_order_by_client_id(self, client_order_id: str) -> dict[str, Any]:
         url = f"{self._settings.alpaca_trading_base_url}/v2/orders:by_client_order_id"
         return self._get_json(url, params={"client_order_id": client_order_id}, headers=self._auth_headers())
+
+    def list_orders(self, status: str = "open") -> list[dict[str, Any]]:
+        url = f"{self._settings.alpaca_trading_base_url}/v2/orders"
+        return self._get_json(url, params={"status": status}, headers=self._auth_headers())
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel an order that hasn't filled. Alpaca answers 204; an order
+        that already filled or was cancelled answers 422."""
+        url = f"{self._settings.alpaca_trading_base_url}/v2/orders/{order_id}"
+        response = request_with_retry(self._session, "DELETE", url, headers=self._auth_headers())
+        response.raise_for_status()

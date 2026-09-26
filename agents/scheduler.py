@@ -37,17 +37,32 @@ from .trace import TraceLogger, failures_by_hour, read_trace, summarize_trace
 
 AGENT_NAME = "scheduler"
 
-# Liquid large caps across sectors: the stocks the desk was tested on.
-DEFAULT_WATCHLIST = ("AAPL", "MSFT", "NVDA", "AMD", "META", "INTC", "CVX", "NFLX", "NKE", "MRK", "ADBE")
+# Liquid US large caps, all US-GAAP filers with complete data (checked live
+# Sept 26, 2026: every source loads and the valuation is computable). The
+# first 11 are the stocks the desk was tested on; the rest widen it beyond
+# tech (decided Sept 26). XOM was left out: SEC's data has no fiscal-2025
+# annual figures for it, so no trailing valuation; CVX covers energy.
+DEFAULT_WATCHLIST = (
+    "AAPL", "MSFT", "NVDA", "AMD", "META", "INTC", "ADBE", "NFLX",  # tech and communication
+    "CVX",                                                          # energy
+    "JPM", "GS",                                                    # financials
+    "MRK", "LLY", "UNH",                                            # health care
+    "PG", "KO", "WMT",                                              # consumer staples
+    "NKE", "HD",                                                    # consumer discretionary
+    "CAT", "GE",                                                    # industrials
+    "NEE",                                                          # utilities
+)
 # 90 minutes before the open: a full watchlist cycle took up to an hour on a
 # slow Build day (Sept 2026), and orders sent before 09:30 queue for the open.
 DECISION_TIME_ET = time(8, 0)
 RETRY_EVERY = timedelta(minutes=30)
 RETRY_UNTIL_ET = time(15, 0)
 POLL_SECONDS = 60
-# Stocks going through the desk at once in a decision cycle. Build's
-# ceiling is 40 requests/minute per model; three stocks keep well under it.
-WORKERS = 3
+# Stocks going through the desk at once in a decision cycle, so the whole
+# watchlist is decided before the 09:30 open (about 9 minutes per stock on
+# a slow Build morning). Build's ceiling is 40 requests/minute per model;
+# four stocks (at most two calls each at a time) keep well under it.
+WORKERS = 4
 
 DECISION, RETRY, IDLE = "decision", "retry", "idle"
 

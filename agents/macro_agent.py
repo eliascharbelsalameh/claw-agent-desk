@@ -25,7 +25,13 @@ from typing import Any, Callable
 from data_layer.alpaca_client import session_in_progress
 from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
-from .computed_facts import compute_technicals, compute_valuation, summarize_earnings
+from .computed_facts import (
+    NET_INCOME_CONCEPTS,
+    REVENUE_CONCEPTS,
+    compute_technicals,
+    compute_valuation,
+    summarize_earnings,
+)
 from .llm_json import BACKUP_CONNECT_RETRIES
 from .trace import TraceLogger
 
@@ -55,19 +61,20 @@ FILING_FORMS = ("10-K", "10-Q", "8-K")
 FUNDAMENTALS_STALE_DAYS = 450
 MAX_FILINGS = 8
 
-# us-gaap concept candidates, first one present wins. Companies differ in
-# which revenue tag they use (ASC 606 introduced the long one).
+# us-gaap concept candidates per fundamental (see extract_fundamentals for
+# how one is chosen). Revenue and net income share their lists with the
+# valuation (computed_facts). Cash: many filers moved to the post-2018 tag
+# that includes restricted cash (JPM, BAC, PG, GE, CVX all read stale without it).
 FUNDAMENTAL_CONCEPTS = {
-    "revenue": (
-        ("RevenueFromContractWithCustomerExcludingAssessedTax", "USD"),
-        ("Revenues", "USD"),
-        ("SalesRevenueNet", "USD"),
-    ),
-    "net_income": (("NetIncomeLoss", "USD"),),
+    "revenue": tuple((concept, "USD") for concept in REVENUE_CONCEPTS),
+    "net_income": tuple((concept, "USD") for concept in NET_INCOME_CONCEPTS),
     "eps_diluted": (("EarningsPerShareDiluted", "USD/shares"),),
     "total_assets": (("Assets", "USD"),),
     "total_liabilities": (("Liabilities", "USD"),),
-    "cash": (("CashAndCashEquivalentsAtCarryingValue", "USD"),),
+    "cash": (
+        ("CashAndCashEquivalentsAtCarryingValue", "USD"),
+        ("CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents", "USD"),
+    ),
 }
 
 NEWS_LOOKBACK_DAYS = 7
@@ -333,12 +340,14 @@ def extract_fundamentals(company_facts: dict[str, Any]) -> dict[str, Any]:
     2022 and its current revenue is under Revenues, while AAPL and MSFT
     went the other way). Among entries sharing the latest period end, the
     shortest duration wins (a 10-Q reports both the quarter and
-    year-to-date for the same end date), then the latest filing. start/end
+    year-to-date for the same end date), then the earlier candidate tag
+    (NetIncomeLoss before its variants), then the latest filing. start/end
     are always reported so readers can tell a quarter from a fiscal year.
     """
     us_gaap = company_facts.get("facts", {}).get("us-gaap", {})
     out: dict[str, Any] = {}
     for name, candidates in FUNDAMENTAL_CONCEPTS.items():
+        rank = {concept: i for i, (concept, _) in enumerate(candidates)}
         entries = [
             (concept, unit, e)
             for concept, unit in candidates
@@ -350,7 +359,7 @@ def extract_fundamentals(company_facts: dict[str, Any]) -> dict[str, Any]:
         latest_end = max(e["end"] for _, _, e in entries)
         concept, unit, best = min(
             (item for item in entries if item[2]["end"] == latest_end),
-            key=lambda item: (_duration_days(item[2]), _neg_date(item[2].get("filed"))),
+            key=lambda item: (_duration_days(item[2]), rank[item[0]], _neg_date(item[2].get("filed"))),
         )
         out[name] = {
             "value": best["val"],

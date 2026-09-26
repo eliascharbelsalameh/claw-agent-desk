@@ -176,3 +176,32 @@ def test_get_bars_asks_for_split_adjusted_bars_and_follows_pages():
     assert len(bars) == 2
     assert session.calls[0]["adjustment"] == "split" and session.calls[0]["feed"] == "iex"
     assert "page_token" not in session.calls[0] and session.calls[1]["page_token"] == "p2"
+
+
+class _RecordingSession:
+    def __init__(self, status=204, body=None):
+        self.calls = []
+        self.status, self.body = status, body
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        response = requests.Response()
+        response.status_code = self.status
+        response._content = json.dumps(self.body).encode() if self.body is not None else b""
+        return response
+
+
+def test_orders_carry_the_client_id_and_can_be_cancelled_or_listed():
+    session = _RecordingSession(status=200, body={"id": "o-1", "status": "accepted"})
+    client = AlpacaClient(settings=_settings(), session=session)
+    assert client.submit_market_order("F", 1, "buy", client_order_id="desk-test-F-buy")["id"] == "o-1"
+    method, url, kwargs = session.calls[0]
+    assert method == "POST" and url.endswith("/v2/orders")
+    assert kwargs["json"] == {"symbol": "F", "qty": "1", "side": "buy", "type": "market", "time_in_force": "day",
+                              "client_order_id": "desk-test-F-buy"}
+    session = _RecordingSession(status=204)
+    AlpacaClient(settings=_settings(), session=session).cancel_order("o-1")
+    assert session.calls[0][0] == "DELETE" and session.calls[0][1].endswith("/v2/orders/o-1")
+    session = _RecordingSession(status=200, body=[])
+    assert AlpacaClient(settings=_settings(), session=session).list_orders() == []
+    assert session.calls[0][2]["params"] == {"status": "open"}

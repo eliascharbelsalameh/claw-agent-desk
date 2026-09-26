@@ -69,7 +69,7 @@ def test_agreed_buy_opens_a_sized_position_with_its_horizon():
     assert [(p.symbol, p.side, p.qty) for p in plans] == [("AAPL", "buy", 28)]
     assert broker.submitted == [("AAPL", 28, "buy", "desk-2026-09-28-AAPL-buy")]
     pos = positions["AAPL"]
-    assert pos["entry_session"] == SESSION and pos["horizon_end"] == "2026-10-05"
+    assert pos["entry_session"] == SESSION and pos["horizon_end"] == "2026-10-01"  # 3 sessions later
     assert pos["order_id"] == "order-1" and pos["dry_run"] is False
     assert notes == []
 
@@ -103,12 +103,12 @@ def test_horizon_exit_only_in_the_decision_cycle_and_not_when_reaffirmed():
     plans, _, _ = _run_step(Portfolio(FakeBroker(positions=[{"symbol": "AMD", "qty": "10"}]), dry_run=False),
                             [_decision("AMD")], positions)
     assert plans == []
-    assert positions["AMD"]["horizon_end"] == "2026-10-05" and positions["AMD"]["reaffirmed"] == SESSION
+    assert positions["AMD"]["horizon_end"] == "2026-10-01" and positions["AMD"]["reaffirmed"] == SESSION
 
 
 def test_limits_gates_and_outside_positions_become_notes():
     broker = FakeBroker(positions=[{"symbol": "MSFT", "qty": "3"}])
-    held = {f"H{i}": {"qty": 1, "entry_session": SESSION, "horizon_end": "2026-10-05", "dry_run": True}
+    held = {f"H{i}": {"qty": 1, "entry_session": SESSION, "horizon_end": "2026-10-01", "dry_run": True}
             for i in range(7)}
     decisions = [
         _decision("AAPL"),

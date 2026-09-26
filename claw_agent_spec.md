@@ -52,7 +52,7 @@ Every agent's input and output is logged with a timestamp, so the demo video can
 - Step 3: the critic loop runs on buy/hold splits and on agreed buys, and is resumable after a deferral.
 - Step 4: the bias gate runs on agreed buys; **a veto needs both bias agents to flag** the buy (a single flag is recorded), mirroring the strict two-analyst match.
 - Step 5: the technical agent only times the entry of a buy that passed the bias gate: *enter* at the next open, or *wait* for a specific chart reason (re-examined the next day). It can't create a buy.
-- Step 6 (`portfolio.py`): only an agreed, ungated buy opens a paper position (10% of equity, whole shares, at most 8 positions, no margin); a position is sold on an agreed avoid or after its 5-session horizon (a fresh agreed buy restarts it); positions the desk didn't open are never touched; orders carry decision-derived ids so they can't be placed twice.
+- Step 6 (`portfolio.py`): only an agreed, ungated buy opens a paper position (10% of equity, whole shares, at most 8 positions, no margin); a position is sold on an agreed avoid or after 3 sessions (decided Sept 26, so a position bought on the first day of the run also closes before the deadline; a fresh agreed buy restarts it); positions the desk didn't open are never touched; orders carry decision-derived ids so they can't be placed twice.
 
 ## 4. Models and rate limits
 
@@ -143,7 +143,7 @@ If time runs short, cut in this order: technical expert, then bias checkers. Kee
 - **Decided (Sept 25):** analyst cross-check uses strict matching — both recommendations must be identical (buy vs hold aborts). No confidence floor: tested and dropped, since the two models report confidence on different scales. A buy-vs-hold split goes to the critic loop for re-votes, and aborts if still unmatched; buy-vs-avoid or a failed verdict aborts at once. Implemented in `agents/cross_check.py`; hold vs avoid (not explicitly decided) aborts under strict matching, which only matters for a stock already held.
 - **Decided (Sept 25):** analyst horizon is the next 2–5 trading days, a forward projection judged only from data available now, so the ~2-day paper run can test the calls on camera.
 - ~~Should decisions be executed on the Alpaca paper account, or only logged?~~ **Decided Sept 26:** executed on the paper account by the deployed scheduler (`--paper-orders`); everything else (CLI, app, `--once`) is log-only.
-- ~~Final list of the three stocks?~~ The scheduler's default watchlist is the 11 liquid large caps the desk was tested on (AAPL MSFT NVDA AMD META INTC CVX NFLX NKE MRK ADBE); the desk rarely agrees on a buy, so a wider list gives the demo a better chance of showing trades.
+- ~~Final list of the three stocks?~~ The scheduler's default watchlist is 22 liquid US large caps across sectors (Sept 26): AAPL MSFT NVDA AMD META INTC ADBE NFLX, CVX, JPM GS, MRK LLY UNH, PG KO WMT, NKE HD, CAT GE, NEE — all US-GAAP filers with complete data (IFRS filers like STLA or NBIS have no SEC fundamentals). The desk agrees on a buy for only some stocks, so a wider list gives the demo a better chance of showing trades.
 - Is FT content usable programmatically, and is Barron's worth buying?
 - Demo output: per-stock reasoning trail, multi-day log, or both?
 - ~~How Build credits get consumed over a multi-day run.~~ No credit balance exists for this account as far as build.nvidia.com shows (Sept 26); only the 40 RPM limit.

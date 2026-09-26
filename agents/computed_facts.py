@@ -19,14 +19,29 @@ numbers mean over the analysts' horizon is left to the analysts.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
-# The same candidate tags the fundamentals use (macro_agent.FUNDAMENTAL_CONCEPTS).
-REVENUE_CONCEPTS = ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet")
-NET_INCOME_CONCEPTS = ("NetIncomeLoss",)
+# us-gaap candidate tags, in order of preference; the fundamentals
+# (macro_agent.FUNDAMENTAL_CONCEPTS) are built from the same lists. Filers
+# differ and switch tags over the years (checked live Sept 26, 2026): banks
+# report total revenue as RevenuesNetOfInterestExpense (JPM, GS), utilities
+# as RegulatedAndUnregulatedOperatingRevenue (NEE, whose Revenues stops in
+# 2013), and CAT's NetIncomeLoss stops in 2011 while its current net income
+# is tagged as available to common stockholders.
+REVENUE_CONCEPTS = (
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "Revenues",
+    "RevenuesNetOfInterestExpense",
+    "RegulatedAndUnregulatedOperatingRevenue",
+    "SalesRevenueNet",
+)
+NET_INCOME_CONCEPTS = ("NetIncomeLoss", "NetIncomeLossAvailableToCommonStockholdersBasic", "ProfitLoss")
 EPS_CONCEPTS = ("EarningsPerShareDiluted",)
 DILUTED_SHARES_CONCEPT = "WeightedAverageNumberOfDilutedSharesOutstanding"
+# Same threshold as macro_agent.FUNDAMENTALS_STALE_DAYS: a trailing figure
+# ending longer ago than this means the filer moved to a tag we don't read.
+STALE_DAYS = 450
 
 VALUATION_NOTE = (
     "Computed by the desk from SEC filings and the latest price. Trailing twelve months "
@@ -121,15 +136,15 @@ def trailing_twelve_months(entries: list[dict[str, Any]]) -> dict[str, Any] | No
 
 def best_ttm(company_facts: dict[str, Any], concepts: tuple[str, ...]) -> dict[str, Any] | None:
     """TTM from the candidate tag whose TTM ends latest (companies switch
-    revenue tags; see macro_agent.extract_fundamentals). Pieces are never
-    mixed across tags: FY from one tag and year-to-date from another would
-    silently combine two definitions."""
+    revenue tags; see macro_agent.extract_fundamentals), the earlier
+    candidate on a tie. Pieces are never mixed across tags: FY from one tag
+    and year-to-date from another would silently combine two definitions."""
     results = []
-    for concept in concepts:
+    for rank, concept in enumerate(concepts):
         ttm = trailing_twelve_months(_duration_entries(company_facts, concept))
         if ttm is not None:
-            results.append({**ttm, "concept": concept})
-    return max(results, key=lambda r: r["period_end"]) if results else None
+            results.append((ttm["period_end"], -rank, {**ttm, "concept": concept}))
+    return max(results, key=lambda r: r[:2])[2] if results else None
 
 
 def latest_diluted_shares(company_facts: dict[str, Any]) -> dict[str, Any] | None:
@@ -154,17 +169,36 @@ def compute_valuation(
     if not price or not price.get("last_close"):
         return None, ["valuation: no price to value the shares at"]
     last = float(price["last_close"])
-    revenue = best_ttm(company_facts, REVENUE_CONCEPTS)
-    net_income = best_ttm(company_facts, NET_INCOME_CONCEPTS)
-    eps = best_ttm(company_facts, EPS_CONCEPTS)
-    shares = latest_diluted_shares(company_facts)
-    gaps = [
+    price_day = str(price.get("last_bar_date", ""))[:10]
+    stale_before = (date.fromisoformat(price_day) - timedelta(days=STALE_DAYS)).isoformat() if price_day else ""
+    gaps: list[str] = []
+
+    def fresh(name: str, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """None for a figure that ends too long ago to value today's price on."""
+        if value is not None and value["period_end"] < stale_before:
+            gaps.append(f"valuation: latest TTM {name} ends {value['period_end']} (stale) - not used")
+            return None
+        return value
+
+    revenue = fresh("revenue", best_ttm(company_facts, REVENUE_CONCEPTS))
+    net_income = fresh("net income", best_ttm(company_facts, NET_INCOME_CONCEPTS))
+    eps = fresh("diluted EPS", best_ttm(company_facts, EPS_CONCEPTS))
+    shares = fresh("diluted share count", latest_diluted_shares(company_facts))
+    gaps += [
         f"valuation: TTM {name} not computable from the filings (missing year-to-date or fiscal-year pieces)"
         for name, value in (("revenue", revenue), ("net income", net_income), ("diluted EPS", eps))
-        if value is None
+        if value is None and not any(f"TTM {name} ends" in g for g in gaps)
     ]
+    shares_note = None
+    implied = (net_income["value"] / eps["value"]) if net_income and eps and eps["value"] else None
+    if shares is not None and implied and implied > 0 and not 0.5 <= shares["value"] / implied <= 2:
+        # Live, MCD filed 712.3 "shares" (millions, unscaled): check the count
+        # against net income / EPS, which prices the same shares.
+        shares_note = (f"the filed diluted share count ({shares['value']:,}) disagrees with net income / EPS "
+                       f"({implied:,.0f}); using the latter")
+        shares = {"value": round(implied), "period_end": net_income["period_end"]}
     if shares is None:
-        gaps.append("valuation: no diluted share count in the filings, so no market cap or price-to-sales")
+        gaps.append("valuation: no usable diluted share count in the filings, so no market cap or price-to-sales")
     if revenue is None and net_income is None and eps is None and shares is None:
         return None, gaps
 
@@ -196,6 +230,8 @@ def compute_valuation(
     if shares:
         out["diluted_shares"] = shares["value"]
         out["diluted_shares_period_end"] = shares["period_end"]
+        if shares_note:
+            out["diluted_shares_note"] = shares_note
     out["note"] = VALUATION_NOTE
     return out, gaps
 
