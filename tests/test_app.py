@@ -129,3 +129,15 @@ def test_desk_state_tab_shows_the_schedulers_memory(app, monkeypatch, tmp_path):
     metrics = {m.label: m.value for m in app.metric}
     assert metrics["Positions (desk)"] == "1" and metrics["Deferred"] == "1"
     assert metrics["Last decision session"] == "2026-09-28"
+
+
+def test_architecture_and_flow_tabs_draw_the_desk(app):
+    app.run()
+    assert not app.exception
+    assert [t.label for t in app.tabs][:5] == ["Run", "Desk state", "Trace viewer", "Architecture", "Flow"]
+    charts = app.get("graphviz_chart")
+    assert len(charts) == 2
+    specs = [c.proto.spec for c in charts]
+    assert specs[0].startswith("digraph architecture") and specs[1].startswith("digraph flow")
+    text = _all_markdown(app)
+    assert "What passes along the arrows" in text and "Where a stock ends up" in text

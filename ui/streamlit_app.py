@@ -5,7 +5,8 @@
 Runs the same DeskPipeline as the CLI (agents/pipeline.py) and shows every
 stage: the context each stock got, both analysts' verdicts with their
 checked evidence, the cross-check, and each critic-loop round. The trace
-viewer replays any past run from its JSONL trace without any LLM call.
+viewer replays any past run from its JSONL trace without any LLM call. The
+Architecture and Flow tabs draw the desk from its code (ui/diagrams.py).
 """
 from __future__ import annotations
 
@@ -22,6 +23,15 @@ if str(REPO_ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from ui.diagrams import (  # noqa: E402
+    HANDOFFS,
+    agent_rows,
+    architecture_dot,
+    architecture_legend,
+    flow_dot,
+    flow_legend,
+    outcome_rows,
+)
 from ui.support import (  # noqa: E402
     OUTCOME_COLORS,
     REC_COLORS,
@@ -284,7 +294,8 @@ st.title("Claw Agent Desk")
 st.caption("Research demo on public and paper-trading data - not financial advice. "
            "Volume figures are IEX-only (~4% of US volume); only relative volume is meaningful.")
 
-run_tab, state_tab, trace_tab = st.tabs(["Run", "Desk state", "Trace viewer"])
+run_tab, state_tab, trace_tab, arch_tab, flow_tab = st.tabs(
+    ["Run", "Desk state", "Trace viewer", "Architecture", "Flow"])
 
 with run_tab:
     if start:
@@ -432,3 +443,25 @@ with trace_tab:
         st.dataframe(shown, hide_index=True, width="stretch")
         st.download_button("Download trace", chosen.read_bytes(), file_name=chosen.name,
                            mime="application/x-ndjson")
+
+
+with arch_tab:
+    st.subheader("Architecture: who talks to whom, and what they pass")
+    st.caption("Independent open-weight models on NVIDIA Build, checked by deterministic rules. No model decides "
+               "alone: a buy needs both analysts to agree, the critic challenges without voting, and a veto needs "
+               "both bias agents. Every model name and limit here is read from the code.")
+    st.markdown(architecture_legend(), unsafe_allow_html=True)
+    st.graphviz_chart(architecture_dot(), width="stretch")
+    st.markdown("#### What passes along the arrows")
+    st.dataframe([{"from → to": a, "what": b} for a, b in HANDOFFS], hide_index=True, width="stretch")
+    st.markdown("#### The agents")
+    st.dataframe(agent_rows(), hide_index=True, width="stretch")
+
+with flow_tab:
+    st.subheader("Flow: every path a stock can take")
+    st.caption("One pass of the scheduler, from the clock check to the saved state: the start event, the waits, the "
+               "API calls, the agents, the decision points, and the loops (polling, critic rounds, retries).")
+    st.markdown(flow_legend(), unsafe_allow_html=True)
+    st.graphviz_chart(flow_dot(), width="stretch")
+    st.markdown("#### Where a stock ends up")
+    st.dataframe(outcome_rows(), hide_index=True, width="stretch")
