@@ -264,7 +264,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - **Where it lives:** the repo was cloned over SSH to `~/repos/claw-agent-desk` and linked as `~/claw-agent-desk`, which is where the unit and the README look.
 - **Setup:** `setup.sh` ran with `DESK_DIR`. `.env` was typed with nano (just the six lines) and the credential check showed all six present.
 - **The two-stock log-only check** (`--once decision --watchlist AAPL MSFT`) reached Build: a nemotron stream drop was retried. Both stocks ended deferred, with gemma flaky at the time.
-- **The service** has been running since 09:41 UTC. It was restarted at 10:16 UTC on `1eb437b`, and again for section 6 before the first cycle. It is enabled, with linger confirmed (`Linger=yes`), so it keeps running with no one connected and starts again after a reboot. Its first decision cycle is at 14:00 CEST (08:00 ET).
+- **The service** has been running since 09:41 UTC. It was restarted at 10:16 UTC on `1eb437b`, again for section 6 before the first cycle, and at ~13:46 UTC on `5d75ede` (the gpt-oss stand-in). It is enabled, with linger confirmed (`Linger=yes`), so it keeps running with no one connected and starts again after a reboot. Its first decision cycle is at 14:00 CEST (08:00 ET).
 - **Watching it:** the app is reached from the PC through a Termius local port forward, PC port 8502 to the server's 8501 (README section 5). The Desk state tab stays empty until that first cycle writes `state/desk_state.json`.
 - **Code changes** reach the server with `git pull --ff-only` and `systemctl --user restart claw-desk-scheduler`.
 - **Section 6 done (Sept 28):**
@@ -308,6 +308,21 @@ Per-source clients, each a thin subclass of `BaseClient`:
   - **laguna** takes up to 6+ minutes per answer and dropped a call.
 - **Live check:** the production path with gemma down handed over within the call. gpt-oss gave a valid hold on JPM, marked as a backup, with 7 of 7 quotes matching, in 182 s including ~2 min spent on gemma.
 
+**First full day on the A1 (Sept 28; the server trace, copied to the PC at 15:19 UTC).**
+- **Passes (UTC):**
+  - 09:15–09:18: the two-stock log-only check, both deferred on gemma;
+  - 12:00–12:22: the decision cycle. AMD aborted and GE ended in an agreed hold (the critic moved it from buy); 20 stocks deferred on gemma;
+  - 12:52–13:30: retry 1, still on the old code: 19 gemma timeouts of 120 s each, one stock at a time, and only META decided (abort);
+  - 13:46–15:04: retry 2, after the restart on `5d75ede` with gpt-oss-20b standing in: 18 stocks decided. MRK stayed deferred: in round 2 the critic timed out on muse-glimmer, then on gemma as its backup.
+- **gpt-oss-20b as analyst_1:** 19 first verdicts and 7 re-votes. gemma answered 4 calls all day and timed out 46 times.
+- **Outcomes:** hold 14 (AAPL CAT CVX GE GS HD INTC JPM KO NEE NFLX PG UNH WMT), avoid NKE, abort AMD ADBE META. Three agreed buys survived the critic, and none was bought:
+  - **LLY:** bias_1 flagged it. bias_2 (nemotron-3.5-lightning) hit `finish_reason: length` at 8,192 tokens on both attempts, 15k–29k characters of reasoning and no JSON, so its answer was unusable and the gate failed. This is the budget risk noted when lightning became bias_2; a fix is pending.
+  - **MSFT:** the bias gate passed (only bias_1 flagged it). Technical agent: *wait*, it had rallied to the intraday high of 519.39 with signs of exhaustion.
+  - **NVDA:** the bias gate passed (only bias_1 flagged it). Technical agent: *wait*, consolidating between 4h support near 223.15 and resistance near 228.91.
+- **No orders and no positions on day 1.** Every stock is analyzed afresh in the next day's 14:00 CEST cycle.
+- **Retry passes run one stock at a time:** retry 2 took 78 min for 19 stocks (gpt-oss ~66 s per verdict, plus critic rounds and the gates).
+- **Keys:** no unmasked `api_key=` or `token=` value anywhere in the server trace.
+
 **Decided Sept 25, 2026:** **strict matching** — the two analysts' `recommendation` values must be identical to continue; a buy-vs-hold split goes to the critic loop for re-votes and aborts if still unmatched, buy vs avoid aborts at once, and hold vs avoid (not explicitly decided; it only matters for a stock already held) aborts under strict matching. **No confidence gate:** the two models report confidence on different scales, so `confidence` stays in the verdict and trace as information only. A failed verdict never counts as agreement (since Sept 26: an unusable one aborts, an unreachable one defers).
 
 **Decided Sept 26, 2026:** one symmetric bar for buy and avoid (option (a): "where the balance leans", not "a clear case"); an analyst outage defers the stock and retries on the same model (no analyst backups — see above); a bias veto needs both bias agents, so a bias_1 pass clears the gate at once, and after 2 hours without bias_2 on a stock a bias_1 flag vetoes alone; the technical agent can only delay an agreed buy, for a specific chart reason; the deployed scheduler places **paper** orders under the rules in `portfolio.py`; the watchlist is 22 US large caps — the 11 tested ones plus 11 outside tech (JPM, GS, LLY, UNH, PG, KO, WMT, HD, CAT, GE, NEE), all with complete data; the holding period is 3 sessions (both decided Sept 26).
@@ -320,7 +335,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - No Claude Code session on the server. A separate `claude` user was set up, then deleted the same day; traces are copied to the PC and analyzed there.
 - analyst_1 fails over to gpt-oss-20b as soon as gemma can't be reached (an unusable answer still aborts). The delay is to be tuned later.
 
-**Next step:** the service is running on the A1 (status above); its first decision cycle is today at 14:00 CEST.
+**Next step:** the service is running on the A1 (status above). Its next decision cycle is Tuesday Sept 29 at 14:00 CEST.
 - Monday Sept 28 is the first trading day of the paper run. A Monday buy is sold at Thursday Oct 1's open (3 sessions). The demo video must be recorded before the Oct 2 deadline.
 - To watch:
   - **gemma's availability.** analyst_1 has no stand-in, so every stock waits while it's down.
@@ -328,5 +343,6 @@ Per-source clients, each a thin subclass of `BaseClient`:
   - **Further model retirements:** a model answering 410 means check `/v1/models`.
   - **gpt-oss-20b standing in for gemma:** it gave a different call from gemma's on 9 of 19 stocks in the screen. Its verdicts show as "(backup)".
   - **Restart between passes.** A retry pass saves each decision as it goes but sends its orders at the end. A restart in the middle of a pass loses the orders for buys decided earlier in that pass. (A decision cycle cut short is re-run in full, so it's safe.)
+  - **bias_2 running out of its token budget:** on Sept 28 nemotron-3.5-lightning spent all 8,192 tokens reasoning on LLY, twice, so the gate failed and the buy was blocked. A fix is pending (first full day, above).
 
 **Usage limits:** build.nvidia.com shows this account only the 40 requests/minute limit — no credit balance (checked by the user, Sept 26), and the API returns none either; the "~1,000 / ~5,000 credits" in the original spec were never confirmed and are dropped. So the practical limits are the RPM ceiling (paced client-side, far above the desk's use) and Build's reliability. If Build ever starts refusing calls for quota reasons, they surface like any other call failure: deferrals, visible in the trace and the Desk state tab. Measured on the 22-stock watchlist (Sept 26 dry run, 4 stocks at a time): the decision cycle took 55 minutes, 112 LLM calls and ~1.34M tokens (~61k per stock); the retry pass 25 minutes and 6 calls.
