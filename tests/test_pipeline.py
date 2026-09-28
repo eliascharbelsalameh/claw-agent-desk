@@ -122,7 +122,8 @@ def test_backups_only_after_the_primary_has_been_down_long_enough():
     analyst = FakeAnalyst(None, "analyst_1")
     analyst.models = ["lab-analyst_1/m", "backup/m"]
     clock = {"now": T0}
-    desk = DeskPipeline(FakeMacro(), analysts={"analyst_1": analyst}, now=lambda: clock["now"])
+    desk = DeskPipeline(FakeMacro(), analysts={"analyst_1": analyst}, now=lambda: clock["now"],
+                        backup_at_once=())
     assert not desk.allow_backup("analyst_1")
     desk.outages.record("lab-analyst_1/m", ok=False, now=T0)
     clock["now"] = T0 + ANALYST_BACKUP_AFTER - timedelta(minutes=1)
@@ -131,6 +132,25 @@ def test_backups_only_after_the_primary_has_been_down_long_enough():
     assert desk.allow_backup("analyst_1")
     analyst.models = ["lab-analyst_1/m"]  # no backup configured: always defer
     assert not desk.allow_backup("analyst_1")
+
+
+class RecordingAnalyst(FakeAnalyst):
+    def __init__(self, llm, role, trace=None):
+        super().__init__(llm, role, trace)
+        self.models = [self.model, f"backup-{role}/m"]
+        self.allowed = []
+
+    def analyze(self, ctx, *, exclude=(), allow_backup=False):
+        self.allowed.append(allow_backup)
+        return super().analyze(ctx, exclude=exclude, allow_backup=allow_backup)
+
+
+def test_analyst_1_may_use_its_backup_at_once_the_others_wait():
+    # Decided Sept 28, 2026: gpt-oss-20b answers as soon as gemma can't be reached
+    analysts = {r: RecordingAnalyst(None, r) for r in ("analyst_1", "analyst_2")}
+    DeskPipeline(FakeMacro(), analysts=analysts).run(["NVDA"])
+    assert analysts["analyst_1"].allowed == [True]   # no outage needed
+    assert analysts["analyst_2"].allowed == [False]  # still waits ANALYST_BACKUP_AFTER
 
 
 def test_parallel_run_matches_the_sequential_one_in_input_order():

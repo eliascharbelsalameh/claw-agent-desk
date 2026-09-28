@@ -491,6 +491,7 @@ class AnalystAgent:
             repaired_event="verdict_repaired",
             health=self._health,
             exclude=exclude,
+            fail_over_unusable=False,
         )
         verdict.model = reply.model or verdict.model
         verdict.fallbacks = reply.fallbacks
@@ -517,8 +518,11 @@ class AnalystAgent:
         26, 2026: when the primary can't be reached the stock is deferred
         and retried next cycle, rather than decided by a backup that judges
         differently (muse-glimmer, analyst_1's backup, said buy 0 times in
-        23 verdicts). The pipeline allows backups only once a primary has
-        been down for a long stretch (pipeline.ANALYST_BACKUP_AFTER)."""
+        23 verdicts). The pipeline allows backups once a primary has been
+        down for a long stretch (pipeline.ANALYST_BACKUP_AFTER), or at once
+        for analyst_1 since Sept 28 (pipeline.ANALYST_BACKUP_AT_ONCE). A
+        backup only stands in for a primary that can't be reached: an
+        unusable answer stays the primary's (and aborts)."""
         verdict = self._new_verdict(ctx)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},

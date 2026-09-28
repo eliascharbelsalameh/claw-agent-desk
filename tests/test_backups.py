@@ -170,6 +170,15 @@ def test_analyst_answers_only_on_its_primary_by_default():
     assert not unusable.ok and not unusable.call_failed
 
 
+def test_analyst_backup_stands_in_only_for_an_unreachable_primary():
+    # Decided Sept 28, 2026: an unusable answer stays the primary's (the stock aborts)
+    llm = RoutedLlm({"p": "no json here", "b": VERDICT})
+    verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(
+        _ctx(), allow_backup=True)
+    assert not verdict.ok and not verdict.call_failed and verdict.model == "p"
+    assert {m for m, _ in llm.calls} == {"p"}
+
+
 def test_analyst_records_the_backup_model_that_answered():
     llm = RoutedLlm({"p": DEAD, "b": VERDICT})
     verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(

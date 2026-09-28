@@ -117,13 +117,23 @@ AGENT_MODELS = {
 # pipeline only lets it answer after the primary has been down for
 # pipeline.ANALYST_BACKUP_AFTER.
 #
+# Decided Sept 28, 2026, with gemma down for most of Sept 27-28: analyst_1
+# fails over to gpt-oss-20b as soon as gemma can't be reached
+# (pipeline.ANALYST_BACKUP_AT_ONCE). Screened that day on gemma's exact
+# prompts for 19 stocks: 19 of 19 answered (median 66 s), 105 of 109
+# citations matching the facts, buy 8 / hold 8 / avoid 3 against gemma's
+# 9 / 5 / 5, the same call as gemma on 10 of 19 (nemotron, the other
+# analyst, 13 of 19). diffusiongemma-26b matched gemma more often (13) but
+# 20 of its 78 citations didn't match the facts; llama-3.2-11b never said
+# avoid; laguna-xs-2.1 was slow and dropped a call.
+#
 # mistral-nemotron left every list on Sept 28, 2026, when Build retired it.
 # Since then the critic and bias_1 have no usable backup (gemma, the critic's
 # other one, is analyst_1's model and always excluded): when muse-glimmer is
 # down they defer like an analyst.
 AGENT_MODEL_BACKUPS: dict[str, list[str]] = {
     "macro": ["google/gemma-4-31b-it"],
-    "analyst_1": [],
+    "analyst_1": ["openai/gpt-oss-20b"],
     "analyst_2": [],
     "critic": ["google/gemma-4-31b-it"],
     "bias_1": [],

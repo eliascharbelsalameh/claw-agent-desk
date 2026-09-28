@@ -19,7 +19,9 @@ model (or every critic candidate) can't be reached, the stock comes out
 up at the failed step - the scheduler does that on its next cycle. Each
 analyst answers on its own primary model; its backups are allowed only after
 the primary has been down for ANALYST_BACKUP_AFTER (tracked in
-ModelOutages, which the scheduler keeps across cycles). At the bias gate a
+ModelOutages, which the scheduler keeps across cycles) - except analyst_1
+since Sept 28 (ANALYST_BACKUP_AT_ONCE): when gemma can't be reached, its
+backup gpt-oss-20b answers within the same call. At the bias gate a
 bias_1 pass clears the buy at once, and once bias_2 has been unreachable on
 a stock for BIAS_SOLO_AFTER a bias_1 flag vetoes it alone (bias_agent.py).
 
@@ -29,6 +31,7 @@ passes each one what the previous stage produced.
 from __future__ import annotations
 
 import threading
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -56,6 +59,11 @@ CROSS_CHECK_ROLES = ("analyst_1", "analyst_2")
 # backups may answer instead of the stock being deferred again. Long enough
 # that ordinary Build drops (minutes) never hand a decision to a backup.
 ANALYST_BACKUP_AFTER = timedelta(hours=3)
+# Decided Sept 28, 2026: analyst_1's backup (gpt-oss-20b) answers as soon as
+# gemma can't be reached, within the same call - gemma was down for most of
+# Sept 27-28 and every stock waited on it. A longer wait, or trying gemma
+# first again once it's back, is to be tuned later.
+ANALYST_BACKUP_AT_ONCE = frozenset({"analyst_1"})
 
 EventCallback = Callable[[str, str, Any], None]
 
@@ -192,6 +200,7 @@ class DeskPipeline:
         max_rounds: int = MAX_ROUNDS,
         outages: ModelOutages | None = None,
         backup_after: timedelta = ANALYST_BACKUP_AFTER,
+        backup_at_once: Collection[str] = ANALYST_BACKUP_AT_ONCE,
         bias_solo_after: timedelta | None = BIAS_SOLO_AFTER,
         now: Callable[[], datetime] = _utcnow,
     ):
@@ -205,6 +214,7 @@ class DeskPipeline:
         self.max_rounds = max_rounds
         self.outages = outages if outages is not None else ModelOutages()
         self.backup_after = backup_after
+        self.backup_at_once = frozenset(backup_at_once)
         self.bias_solo_after = bias_solo_after
         self._now = now
 
@@ -270,11 +280,17 @@ class DeskPipeline:
             return list(pool.map(one, symbols))
 
     def allow_backup(self, role: str) -> bool:
-        """Whether `role` may answer on a backup: only once its primary has
-        been unreachable for backup_after."""
+        """Whether `role` may answer on a backup: at once for the roles in
+        backup_at_once (the backup takes over within the call when the
+        primary can't be reached), otherwise only once the primary has been
+        unreachable for backup_after."""
         analyst = self.analysts[role]
+        if len(analyst.models) < 2:
+            return False
+        if role in self.backup_at_once:
+            return True
         down = self.outages.down_for(analyst.model, self._now())
-        return len(analyst.models) > 1 and down is not None and down >= self.backup_after
+        return down is not None and down >= self.backup_after
 
     def _analyze(self, run: SymbolRun, roles: list[str], emit: EventCallback) -> None:
         """First verdicts for `roles`, in parallel. The analysts can't land

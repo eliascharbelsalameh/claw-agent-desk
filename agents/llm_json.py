@@ -157,6 +157,7 @@ def request_json(
     health: Any | None = None,
     exclude: Collection[str] = (),
     backup_retries: int = BACKUP_CONNECT_RETRIES,
+    fail_over_unusable: bool = True,
 ) -> JsonReply:
     """Ask for one JSON object that passes `validate`, trying `models` in
     order until one produces it.
@@ -169,7 +170,10 @@ def request_json(
     independence for this call; `health` (a ModelHealth) moves models that
     just failed to the back of the queue and learns from this call. Every
     reply and failure is sent to `log` with `base` and the model merged in,
-    so each agent's trace reads the same way.
+    so each agent's trace reads the same way. With fail_over_unusable=False
+    only a model that can't be reached hands over; an unusable answer ends
+    the call (the analysts: a backup stands in for an unreachable primary,
+    not for one that answered badly).
     """
     ordered = [models] if isinstance(models, str) else list(dict.fromkeys(models))
     excluded = set(exclude)
@@ -205,6 +209,8 @@ def request_json(
             return reply
         if reply.call_failed and health is not None:
             health.record_failure(model)
+        if not reply.call_failed and not fail_over_unusable:
+            break
         if has_backup:
             tried.append({"model": model, "error": reply.error, "call_failed": reply.call_failed})
             log("fallback", {**base, "from_model": model, "to_model": candidates[i + 1], "reason": reply.error})
