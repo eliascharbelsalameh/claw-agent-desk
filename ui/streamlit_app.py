@@ -402,7 +402,10 @@ with state_tab:
                            "orders": sum(1 for o in c.get("orders") or [] if "side" in o),
                            "llm calls": (c.get("llm") or {}).get("llm_calls"),
                            "llm errors": (c.get("llm") or {}).get("llm_errors"),
-                           "dry run": c.get("dry_run")} for c in reversed(desk.cycles)], hide_index=True)
+                           "dry run": c.get("dry_run"),
+                           "next pass (UTC)": " ".join(filter(None, [(c.get("next_pass") or {}).get("kind"),
+                                                                     ((c.get("next_pass") or {}).get("due_utc") or "")[:16]]))}
+                          for c in reversed(desk.cycles)], hide_index=True)
 
 with trace_tab:
     files = sorted(LOG_DIR.glob("*.jsonl"), reverse=True) if LOG_DIR.exists() else []

@@ -24,7 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time as time_module
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -254,12 +254,48 @@ class DeskScheduler:
             "llm": summarize_trace(recent),
             "llm_by_utc_hour": failures_by_hour(recent),
             "dry_run": self.dry_run,
+            "next_pass": self._next_pass(session),
         }
         self.state.cycles.append(summary)
         trace.log(AGENT_NAME, "cycle_end", summary)
+        print(f"{kind} pass for session {session} done: {len(decisions)} decided, {len(self.state.pending)} deferred, "
+              f"{sum(1 for o in orders if 'side' in o)} orders; {describe_next_pass(summary['next_pass'])}", flush=True)
         self._save(pipeline)
         self._last_pass = self._now()
         return summary
+
+
+    def _next_pass(self, session: str) -> dict[str, Any] | None:
+        """When the scheduler acts next, for the log: a retry pass RETRY_EVERY
+        from now while a stock is deferred and there is still time today,
+        otherwise the next session's decision cycle (from Alpaca's calendar,
+        with the ET offset of its clock). None when either can't be read - a
+        log line must never fail a pass."""
+        try:
+            now_et = datetime.fromisoformat(self._broker.get_clock()["timestamp"])
+            retry_et = now_et + RETRY_EVERY
+            if self.state.pending and retry_et.date() == now_et.date() and retry_et.time() < RETRY_UNTIL_ET:
+                return {"kind": RETRY, "due_utc": (self._now() + RETRY_EVERY).isoformat(),
+                        "note": f"{len(self.state.pending)} deferred"}
+            day = date.fromisoformat(session)
+            if self.state.last_decision_session == session:
+                calendar = self._broker.get_calendar(day + timedelta(days=1), day + timedelta(days=10))
+                day = min(date.fromisoformat(str(d["date"])) for d in calendar)
+            due = datetime.combine(day, DECISION_TIME_ET, tzinfo=now_et.tzinfo)
+            note = f"session {day.isoformat()}"
+            if self.state.pending:
+                note += f"; the {len(self.state.pending)} deferred are dropped then"
+            return {"kind": DECISION, "due_utc": due.astimezone(timezone.utc).isoformat(), "note": note}
+        except Exception:  # noqa: BLE001
+            return None
+
+
+def describe_next_pass(next_pass: dict[str, Any] | None) -> str:
+    if next_pass is None:
+        return "next pass: unknown (market clock or calendar unreadable)"
+    what = "retry pass" if next_pass["kind"] == RETRY else "decision cycle"
+    due = datetime.fromisoformat(next_pass["due_utc"])
+    return f"next: {what} at {due:%Y-%m-%d %H:%M} UTC ({next_pass['note']})"
 
 
 def main(argv: list[str] | None = None) -> int:

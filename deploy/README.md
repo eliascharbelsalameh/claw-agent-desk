@@ -141,7 +141,7 @@ Oracle console. Local port 8502 keeps it apart from an app running on your PC (8
 session stops the app; the scheduler keeps running.
 
 - **Desk state** lists positions, deferred stocks, decisions and every pass, including LLM calls and
-  failures. It stays empty until the service's first decision cycle (08:00 ET), because the scheduler
+  failures and when the next pass is due. It stays empty until the service's first decision cycle (08:00 ET), because the scheduler
   only writes its state file during a pass. Log-only runs keep theirs in
   `state/desk_state-log-only.json`. To see it, start the app with
   `CLAW_DESK_STATE=state/desk_state-log-only.json` in front of the command.
@@ -153,7 +153,7 @@ From any SSH session:
 
 ```bash
 systemctl --user status claw-desk-scheduler    # is it running, and since when
-journalctl --user -u claw-desk-scheduler -f    # its output: the start line and Build retry warnings
+journalctl --user -u claw-desk-scheduler -f    # one line per pass, with when the next is due; Build retry warnings
 ```
 
 ## 6. Copy the traces to your PC

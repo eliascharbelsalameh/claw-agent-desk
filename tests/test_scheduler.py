@@ -82,7 +82,7 @@ def _scheduler(tmp_path, broker, clock_box, watchlist=("AAPL", "MSFT", "NVDA"), 
 T0 = datetime(2026, 9, 28, 12, 5, tzinfo=timezone.utc)
 
 
-def test_a_trading_day(tmp_path):
+def test_a_trading_day(tmp_path, capsys):
     broker = FakeBroker()
     box = {"clock": EARLY, "now": T0}
     sched = _scheduler(tmp_path, broker, box)
@@ -98,6 +98,8 @@ def test_a_trading_day(tmp_path):
     assert "could not reach analyst_2" in state.pending["AAPL"]["reason"]
     assert set(state.positions) == {"MSFT"} and broker.submitted[0][:3] == ("MSFT", 98, "buy")
     assert state.cycles[-1]["kind"] == DECISION and state.cycles[-1]["pending"] == ["AAPL"]
+    # AAPL is deferred and it's early: the next pass is a retry, RETRY_EVERY after this one
+    assert state.cycles[-1]["next_pass"] == {"kind": RETRY, "due_utc": (T0 + RETRY_EVERY).isoformat(), "note": "1 deferred"}
 
     # the retry waits RETRY_EVERY after the decision cycle, to give Build time to recover
     box["clock"], box["now"] = MIDDAY, T0 + timedelta(minutes=10)
@@ -108,6 +110,11 @@ def test_a_trading_day(tmp_path):
     assert state.pending == {}
     assert state.decisions[-1]["symbol"] == "AAPL" and state.decisions[-1]["recommendation"] == "hold"
     assert state.cycles[-1]["kind"] == RETRY and state.cycles[-1]["decisions"] == {"AAPL": "agree hold"}
+    # nothing deferred: the next pass is Tuesday's decision cycle at 08:00 ET
+    assert state.cycles[-1]["next_pass"]["kind"] == DECISION
+    assert state.cycles[-1]["next_pass"]["due_utc"] == "2026-09-29T12:00:00+00:00"
+    assert "retry pass for session 2026-09-28 done: 1 decided, 0 deferred, 0 orders; " \
+           "next: decision cycle at 2026-09-29 12:00 UTC (session 2026-09-29)" in capsys.readouterr().out
     assert sched.tick() == IDLE  # decided, nothing pending
 
     box["clock"] = AFTER_CLOSE
@@ -223,6 +230,22 @@ def test_a_state_file_from_before_the_mode_was_recorded_is_judged_by_its_cycles(
     DeskState(cycles=[{"kind": "decision", "dry_run": False}]).save(tmp_path / "state.json")
     with pytest.raises(ValueError, match="belongs to a paper-order scheduler"):
         _scheduler(tmp_path, FakeBroker(), {"clock": PRE_MARKET, "now": T0}, dry_run=True)
+
+
+def test_next_pass_after_the_retry_window_is_the_next_decision_cycle(tmp_path):
+    late = _clock("2026-09-28T14:45:00-04:00", is_open=True, next_open="2026-09-29T09:30:00-04:00")
+    sched = _scheduler(tmp_path, FakeBroker(), {"clock": late, "now": T0})
+    sched.state.pending["AAPL"] = {"session": "2026-09-28"}
+    sched.state.last_decision_session = "2026-09-28"
+    nxt = sched._next_pass("2026-09-28")
+    assert nxt["kind"] == DECISION and nxt["due_utc"] == "2026-09-29T12:00:00+00:00"
+    assert nxt["note"] == "session 2026-09-29; the 1 deferred are dropped then"
+
+    def broken_clock():
+        raise ConnectionError("alpaca down")
+
+    sched._broker.get_clock = broken_clock
+    assert sched._next_pass("2026-09-28") is None  # a log line never fails a pass
 
 
 def test_weekend_is_idle(tmp_path):
