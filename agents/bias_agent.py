@@ -44,7 +44,10 @@ from .macro_agent import StockContext
 from .trace import TraceLogger
 
 BIAS_ROLES = ("bias_1", "bias_2")
-BIAS_MAX_TOKENS = 8192
+# Output tokens per check, by role. Decided Sept 28, 2026: bias_2's model
+# (nemotron-3.5-lightning) reasons at length - on LLY it spent all 8,192
+# tokens reasoning, twice, never reached its JSON, and the gate failed.
+BIAS_MAX_TOKENS = {"bias_1": 8192, "bias_2": 16384}
 BIAS_TEMPERATURE = 0.0
 CHECKS = ("news_driven", "stale_news", "trend_chasing")
 
@@ -155,7 +158,7 @@ class BiasAgent:
         model: str | None = None,
         models: Sequence[str] | None = None,
         health: ModelHealth | None = None,
-        max_tokens: int = BIAS_MAX_TOKENS,
+        max_tokens: int | None = None,
         temperature: float = BIAS_TEMPERATURE,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
@@ -165,7 +168,7 @@ class BiasAgent:
         self.model = self.models[0]
         self._health = health if health is not None else DEFAULT_MODEL_HEALTH
         self._trace = trace
-        self._max_tokens = max_tokens
+        self._max_tokens = max_tokens or BIAS_MAX_TOKENS.get(role, BIAS_MAX_TOKENS["bias_1"])
         self._temperature = temperature
         self._now = now
 

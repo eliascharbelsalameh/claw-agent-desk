@@ -73,6 +73,14 @@ def test_review_checks_evidence_and_never_uses_an_analysts_model():
     assert [m for m, _ in llm.calls] == ["b2/m"]
 
 
+def test_bias_2_gets_the_larger_token_budget():
+    # Sept 28, 2026: lightning spent all 8,192 tokens reasoning on LLY, twice
+    for role, budget in (("bias_1", 8192), ("bias_2", 16384)):
+        llm = RoutedLlm({"b/m": _reply()})
+        BiasAgent(llm, role, models=["b/m"], health=ModelHealth()).review(_ctx(), _verdicts())
+        assert llm.calls[0][1]["max_tokens"] == budget
+
+
 def test_review_failures_say_whether_to_retry():
     down = BiasAgent(RoutedLlm({"b/m": DEAD}), "bias_1", models=["b/m"], health=ModelHealth()).review(
         _ctx(), _verdicts())
