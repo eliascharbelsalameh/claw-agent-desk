@@ -88,19 +88,42 @@ never placed twice.
 
 ## 5. Watch it
 
-The Streamlit app reads the same state and traces. Run it on the server and reach it through an
-SSH tunnel. Never open port 8501 to the internet: the app makes Build calls on your key, and its trace
-viewer shows everything the agents saw.
+The Streamlit app reads the same state and traces. Run it on the server and reach it from your PC
+through an SSH tunnel. On the server it only listens to the machine itself (`.streamlit/config.toml`),
+so nothing is exposed. Never open port 8501 to the internet: the app makes Build calls on your key,
+and its trace viewer shows everything the agents saw.
+
+With Termius on your PC, let Termius make the tunnel, so the key never leaves it:
+
+1. *Port Forwarding* → new rule → *Local*: local port `8502`, your instance as the host, destination
+   `localhost`, destination port `8501`. Start the rule.
+2. In a Termius terminal on the server:
+   ```bash
+   cd ~/claw-agent-desk && .venv/bin/streamlit run ui/streamlit_app.py
+   ```
+3. Open http://localhost:8502 on your PC.
+
+With a key file on your PC instead, run `ssh -i <key file> -L 8502:localhost:8501 ubuntu@<public-ip>`
+and the same `streamlit run` in that session. The `ubuntu@instance-...` in the server's prompt is the
+user and the server's own name, not its address. The public IP is in Termius's host entry or the
+Oracle console. Local port 8502 keeps it apart from an app running on your PC (8501). Closing the
+session stops the app; the scheduler keeps running.
+
+- **Desk state** lists positions, deferred stocks, decisions and every pass, including LLM calls and
+  failures. It stays empty until the service's first decision cycle (08:00 ET), because the scheduler
+  only writes its state file during a pass. Log-only runs keep theirs in
+  `state/desk_state-log-only.json`. To see it, start the app with
+  `CLAW_DESK_STATE=state/desk_state-log-only.json` in front of the command.
+- **Trace viewer** replays any day's trace. Log-only runs and the service write to the same daily file.
+- Don't press **Run** in the server's app while the service runs. It would start a separate desk run on
+  the same key, and its calls would mix into the day's trace and the scheduler's call counts.
+
+From any SSH session:
 
 ```bash
-# on the server
-.venv/bin/streamlit run ui/streamlit_app.py
-# on your machine
-ssh -L 8501:localhost:8501 <user>@<instance-ip>    # then open http://localhost:8501
+systemctl --user status claw-desk-scheduler    # is it running, and since when
+journalctl --user -u claw-desk-scheduler -f    # its output: the start line and Build retry warnings
 ```
-
-The **Desk state** tab lists positions, deferred stocks, decisions and every pass, including LLM
-calls and failures. The **Trace viewer** tab replays any day's trace.
 
 ## 6. A Claude Code session on the server
 

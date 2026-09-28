@@ -264,8 +264,10 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - **Where it lives:** the repo was cloned over SSH to `~/repos/claw-agent-desk` and linked as `~/claw-agent-desk`, which is where the unit and the README look.
 - **Setup:** `setup.sh` ran with `DESK_DIR`. `.env` was typed with nano (just the six lines) and the credential check showed all six present.
 - **The two-stock log-only check** (`--once decision --watchlist AAPL MSFT`) reached Build: a nemotron stream drop was retried. Both stocks ended deferred, with gemma flaky at the time.
-- **Next:** the service (README section 4) before the 14:00 CEST (08:00 ET) decision cycle, then the Claude user (section 6).
-- **After this commit:** `git pull --ff-only` and `systemctl --user restart claw-desk-scheduler` put the new bias_2 on the server.
+- **The service** has been running since 09:41 UTC (enabled, with linger). Its first decision cycle is at 14:00 CEST (08:00 ET).
+- **Watching it:** the app is reached from the PC through a Termius local port forward, PC port 8502 to the server's 8501 (README section 5). The Desk state tab stays empty until that first cycle writes `state/desk_state.json`.
+- **Code changes** reach the server with `git pull --ff-only` and `systemctl --user restart claw-desk-scheduler`.
+- **Next:** the Claude user (section 6).
 
 **Decided Sept 25, 2026:** **strict matching** — the two analysts' `recommendation` values must be identical to continue; a buy-vs-hold split goes to the critic loop for re-votes and aborts if still unmatched, buy vs avoid aborts at once, and hold vs avoid (not explicitly decided; it only matters for a stock already held) aborts under strict matching. **No confidence gate:** the two models report confidence on different scales, so `confidence` stays in the verdict and trace as information only. A failed verdict never counts as agreement (since Sept 26: an unusable one aborts, an unreachable one defers).
 
@@ -278,7 +280,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - Keys are redacted from every error text the desk logs or sends.
 - A Claude Code session on the server runs as a separate user with no sudo, which can read only `/srv/claw-desk`.
 
-**Next step:** get the scheduler service running on the A1 before the 14:00 CEST cycle (status above).
+**Next step:** the service is running on the A1 (status above); its first decision cycle is today at 14:00 CEST.
 - Monday Sept 28 is the first trading day of the paper run. A Monday buy is sold at Thursday Oct 1's open (3 sessions). The demo video must be recorded before the Oct 2 deadline.
 - To watch:
   - **gemma's availability.** analyst_1 has no stand-in, so every stock waits while it's down.
