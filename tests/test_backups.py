@@ -179,6 +179,13 @@ def test_analyst_backup_stands_in_only_for_an_unreachable_primary():
     assert {m for m, _ in llm.calls} == {"p"}
 
 
+def test_analysts_get_a_16k_output_budget():
+    # Sept 28, 2026: nemotron's re-vote on MRK was cut off at 8,192 tokens
+    llm = RoutedLlm({"p": VERDICT})
+    AnalystAgent(llm, "analyst_2", models=["p"], health=ModelHealth()).analyze(_ctx())
+    assert llm.calls[0][1]["max_tokens"] == 16384
+
+
 def test_analyst_records_the_backup_model_that_answered():
     llm = RoutedLlm({"p": DEAD, "b": VERDICT})
     verdict = AnalystAgent(llm, "analyst_1", models=["p", "b"], health=ModelHealth()).analyze(

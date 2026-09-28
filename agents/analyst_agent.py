@@ -53,8 +53,10 @@ RECOMMENDATIONS = ("buy", "hold", "avoid")
 HORIZON = "the next 2 to 5 trading days"
 
 # Reasoning models (analyst_2's Nemotron) spend part of this budget on
-# hidden reasoning before the JSON; observed completions stay under ~3k.
-ANALYST_MAX_TOKENS = 8192
+# hidden reasoning before the JSON; first verdicts usually stay under ~3k.
+# Decided Sept 28, 2026: 16,384, after nemotron's re-vote on MRK (the
+# largest prompt the desk sends) was cut off at 8,192 and the stock aborted.
+ANALYST_MAX_TOKENS = 16384
 
 # At 0.2, 4 of 6 stock/analyst pairs flipped between buy and hold across 5
 # repeats on identical input. At 0 (Sept 25, 2026), gemma-4-31b-it returned

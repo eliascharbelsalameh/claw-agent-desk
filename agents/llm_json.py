@@ -26,7 +26,9 @@ def extract_json_object(text: str, repairs: list[str] | None = None) -> dict[str
 
     If the JSON doesn't parse, repair_json_quotes gets one try; when that
     produces valid JSON, a description of each fix is appended to `repairs`
-    (if given) so the caller can log exactly what was changed.
+    (if given) so the caller can log exactly what was changed. Raw tabs and
+    line breaks inside strings are accepted (strict=False): models emit them
+    unescaped, and the content is unchanged either way.
     """
     text = _FENCE_RE.sub("", text.strip())
     start, end = text.find("{"), text.rfind("}")
@@ -34,11 +36,11 @@ def extract_json_object(text: str, repairs: list[str] | None = None) -> dict[str
         raise ValueError("no JSON object found in reply")
     body = text[start : end + 1]
     try:
-        obj = json.loads(body)
+        obj = json.loads(body, strict=False)
     except json.JSONDecodeError as exc:
         repaired, fixes = repair_json_quotes(body)
         try:
-            obj = json.loads(repaired) if fixes else None
+            obj = json.loads(repaired, strict=False) if fixes else None
         except json.JSONDecodeError:
             obj = None
         if obj is None:

@@ -76,6 +76,13 @@ def _analyst(llm, trace=None):
 
 # --- parsing ---
 
+def test_extract_json_object_accepts_raw_tabs_and_line_breaks_in_strings():
+    assert extract_json_object('{"thesis": "line one\nline two\tend"}') == {"thesis": "line one\nline two\tend"}
+    # still no guessing at broken structure (nemotron's MRK re-vote, Sept 28)
+    with pytest.raises(ValueError):
+        extract_json_object('{"evidence": [{"why": "a"},\n    "\n    },\n    {"why": "b"}]}')
+
+
 def test_extract_json_object_tolerates_fences_and_prose():
     assert extract_json_object('```json\n{"a": 1}\n```') == {"a": 1}
     assert extract_json_object('Here you go: {"a": {"b": 2}} hope it helps') == {"a": {"b": 2}}
