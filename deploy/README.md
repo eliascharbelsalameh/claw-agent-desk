@@ -22,7 +22,8 @@ is where the service unit and the commands below look:
 cd ~/repos/claw-agent-desk && DESK_DIR=$PWD bash deploy/setup.sh
 ln -s ~/repos/claw-agent-desk ~/claw-agent-desk
 ```
- The script installs git and Python 3.11+ (Ubuntu
+
+The script installs git and Python 3.11+ (Ubuntu
 22.04 ships 3.10, which can't parse Alpaca's nanosecond timestamps). It also creates `.venv`,
 installs `requirements.txt`, creates `.env` from `.env.example` with mode 600, and runs the tests.
 
@@ -40,9 +41,8 @@ the `=`. The User-Agent contains a space, so quote it: `SEC_EDGAR_USER_AGENT="Yo
 Save with Ctrl+O and Enter, then exit with Ctrl+X.
 
 Don't set them with `export` or `echo ... >> .env`, because anything typed on the command line ends up
-in your shell history. Don't paste them into a chat or a Claude session either (section 6 keeps a
-Claude session on this server away from them). Keep the file readable by you alone, and check that
-each credential is present without printing it:
+in your shell history. Don't paste them into a chat or a Claude session either. Keep the file
+readable by you alone, and check that each credential is present without printing it:
 
 ```bash
 chmod 600 .env
@@ -94,7 +94,7 @@ loginctl show-user "$USER" --property=Linger   # must print Linger=yes
 ```
 
 **The service doesn't need you connected.** Closing Termius or shutting down your PC only ends what runs
-inside those sessions: the app, the tunnel, a Claude session. The scheduler keeps going on its own:
+inside those sessions, such as the app and the tunnel. The scheduler keeps going on its own:
 
 - it runs the cycles and places the orders;
 - systemd restarts it within 30 seconds if it crashes (`Restart=always`);
@@ -156,50 +156,39 @@ systemctl --user status claw-desk-scheduler    # is it running, and since when
 journalctl --user -u claw-desk-scheduler -f    # its output: the start line and Build retry warnings
 ```
 
-## 6. A Claude Code session on the server
+## 6. Copy the traces to your PC
 
-A Claude Code session can read every file its Unix user can read and run anything that user can run,
-so permission rules inside Claude Code aren't enough to keep the keys out of it. Run it as a separate
-user that has no sudo and no way into your home, and put the desk's logs and state where it can read
-them, outside your home. Don't give it a way through your home instead: files in your other repos
-are usually readable by any user who can reach them.
+The analysis happens on your PC; the server only runs the desk. With Termius's SFTP (open the host,
+then *SFTP*), download the day's trace and the state into the repo's `logs/server/` folder on your
+PC:
 
-```bash
-# as your admin user (the one that runs the service), once
-sudo adduser --disabled-password --gecos "" claude   # no password, not in the sudo group
-chmod 750 ~                                           # other users can't enter your home (usually already so)
-sudo apt-get install -y acl
-sudo install -d -o "$USER" -g "$USER" -m 750 /srv/claw-desk
-# move logs/ and state/ there; the desk keeps using them through links
-systemctl --user stop claw-desk-scheduler
-cd ~/claw-agent-desk && mv logs state /srv/claw-desk/
-ln -s /srv/claw-desk/logs logs && ln -s /srv/claw-desk/state state
-systemctl --user start claw-desk-scheduler
-# claude may read /srv/claw-desk, including files created later - nothing else of yours
-setfacl -R -m u:claude:rX /srv/claw-desk
-setfacl -d -m u:claude:rX /srv/claw-desk /srv/claw-desk/logs /srv/claw-desk/state
-sudo -u claude cat ~/claw-agent-desk/.env   # must fail with "Permission denied"
-sudo -u claude ls /srv/claw-desk/logs       # must list the traces
+- `~/claw-agent-desk/logs/trace-YYYYMMDD.jsonl` (the date is in UTC)
+- `~/claw-agent-desk/state/desk_state.json`
+
+`logs/` is gitignored, and the separate folder keeps them apart from your PC's own traces, which have
+the same file names. To browse them in your local app, start it from a new PowerShell window:
+
+```powershell
+$env:CLAW_DESK_LOG_DIR = "logs\server"; $env:CLAW_DESK_STATE = "logs\server\desk_state.json"
+.venv\Scripts\streamlit run ui\streamlit_app.py
 ```
 
-Then start sessions as that user, in its own clone of the repo:
-
-```bash
-sudo -iu claude
-curl -fsSL https://claude.ai/install.sh | bash   # Claude Code for this user only; then log in
-git clone https://github.com/eliascharbelsalameh/claw-agent-desk.git && cd claw-agent-desk && claude
-```
-
-The session reads the code in its own clone and the live traces and state in `/srv/claw-desk`. It
-can't enter your home, so it can't see the keys, the data cache or your other repos. It also can't
-use sudo or restart the service; do those yourself. Never start `claude` from your admin account.
-
-The desk also keeps the keys out of everything it writes. FRED and Finnhub take their keys in the URL,
-so error texts are redacted before they become data gaps (which the analysts see) or trace lines.
+The traces contain no keys. FRED and Finnhub take their keys in the URL, so error texts are redacted
+before they become data gaps or trace lines. They do contain everything the agents saw and said, so
+keep them out of git.
 
 ## Updating
 
 ```bash
 cd ~/claw-agent-desk && git pull --ff-only && .venv/bin/python -m pip install -r requirements.txt
 systemctl --user restart claw-desk-scheduler
+```
+
+Restart between two passes, not during one. A retry pass saves each decision as it goes but sends its
+orders at the end, so a restart in the middle loses the orders for buys it already decided. The
+passes are in the trace:
+
+```bash
+grep -o '"ts": "[^"]*", "agent": "scheduler", "event": "cycle_[a-z]*", "kind": "[a-z]*"' \
+  logs/trace-$(date -u +%Y%m%d).jsonl | tail -2   # safe to restart if the last line is a cycle_end
 ```

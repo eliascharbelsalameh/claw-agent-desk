@@ -45,7 +45,7 @@ Tests never hit real APIs — every client is exercised with a fake `session.req
 
 All six credentials are **already set as Windows user-level environment variables** (not in `.env`): `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `FRED_API_KEY`, `FINNHUB_API_KEY`, `SEC_EDGAR_USER_AGENT`, `NVIDIA_API_KEY`. `.env.example` documents them; `.env` exists but its secret fields are deliberately blank (only non-secret base URLs / cache dir remain). `load_dotenv()` doesn't override already-set OS env vars, so the env vars win — nothing needs changing in code.
 
-On the Oracle A1 server the same six live in the repo's `.env` (mode 600), typed with nano by the admin user (never with `export`/`echo`, which land in the shell history). A `.env` holding only the six lines is enough: the base URLs and the cache dir default to the paper account, Build and `.cache` (`config.get_settings`). A Claude Code session on the server runs as a separate user that can't read it (`deploy/README.md` section 6).
+On the Oracle A1 server the same six live in the repo's `.env` (mode 600), typed with nano by the admin user (never with `export`/`echo`, which land in the shell history). A `.env` holding only the six lines is enough: the base URLs and the cache dir default to the paper account, Build and `.cache` (`config.get_settings`). No Claude Code session runs on the server. Traces and state are copied to the PC and analyzed there (`deploy/README.md` section 6).
 
 **Don't read, `cat`, or write credential values through a Claude Code session.** Claude Code's file-watcher diffs any tool-touched file back into the transcript when it changes on disk, which already leaked (and forced rotation of) two keys during setup. Verify presence without exposing values, e.g.:
 
@@ -54,35 +54,6 @@ powershell -c "[Environment]::GetEnvironmentVariable('NVIDIA_API_KEY','User').Le
 ```
 
 Note that a shell started *before* a `setx` won't see the new value — an existing session's Bash tool may report a var as unset when it's actually set. Read `HKCU\Environment` (via PowerShell or Python's `winreg`) to check reliably, or have one-off live scripts load from there directly.
-
-## If you're the Claude session on the A1 server
-
-On the Oracle A1 instance (`instance-20260602-0216`), a Claude Code session runs as the Linux user `claude`, in its own clone (`/home/claude/claw-agent-desk`), set up by `deploy/README.md` section 6. If that's you (`whoami` prints `claude`):
-
-- **No keys, no sudo, no access to `/home/ubuntu`.** Anything that calls an API fails for lack of credentials: live runs (`python -m agents ...`, `--once`), the app's Run button, model probes. Don't try them. Never look for keys or ask for them to be pasted in.
-- **The live data, read-only:**
-  - Traces: `/srv/claw-desk/logs/trace-YYYYMMDD.jsonl` (the date is in UTC).
-  - The service's state: `/srv/claw-desk/state/desk_state.json`. Log-only runs write `desk_state-log-only.json` there.
-  - If section 6's optional links were made, both folders also appear as `logs/` and `state/` in this clone.
-  - In the state, `cycles[-1]` summarizes the last pass: decisions, deferred stocks, orders, and LLM calls and failures by UTC hour. `pending[symbol].reason` says why a stock is waiting.
-  - `agents.trace.read_trace`, `summarize_trace` and `failures_by_hour` read the traces.
-- **The service:**
-  - `claw-desk-scheduler` is a systemd user unit of `ubuntu`. It runs `/home/ubuntu/repos/claw-agent-desk` (linked as `~/claw-agent-desk`) with `--paper-orders`.
-  - This session can't see its journal, restart it or reach Alpaca; the user does all that as `ubuntu`.
-  - Code changes go through the PC session and GitHub. On the server the user runs `git pull --ff-only && systemctl --user restart claw-desk-scheduler` as `ubuntu`, never during a pass.
-  - This clone can't push. Analyze, don't edit, and leave tracked files unchanged so `git pull --ff-only` keeps working.
-- **Daily schedule (CEST):**
-  - decision cycle at 14:00 (08:00 ET, 12:00 UTC);
-  - its orders queue for the 15:30 open;
-  - retry passes every 30 minutes until 21:00;
-  - the state file is written at the end of each pass;
-  - a Monday buy is sold at Thursday's open (3 sessions).
-- **Watch for:**
-  - gemma dropping calls, which leaves stocks deferred;
-  - bias_2 on nemotron-3.5-lightning, which is lenient and slow;
-  - a model answering 410, which means it has been retired. This session can't check `/v1/models`, so tell the user.
-- **Security:** traces mask `api_key=` and `token=` values (`http_utils.redact`). A readable key anywhere in a trace or the state is a leak: report it at once, because the key needs rotating.
-- **Don't run `/init`.** This file is maintained from the PC session.
 
 ## Architecture
 
@@ -147,7 +118,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - It has no automatic retries: deferred stocks wait for **Retry deferred**. A new run or a closed tab drops them.
 - On one machine the two share the Build key, the data cache and the day's trace file, so a scheduler pass's call counts would include the app's calls. `support.py` holds the Streamlit-free helpers (ticker parsing, credential presence, the Windows user-env loader, trace summaries) so they can be unit-tested. Tests drive the real app headlessly with `streamlit.testing.v1.AppTest`, with every live component swapped for the fakes in `tests/fakes.py` (set `CLAW_DESK_NO_REGISTRY` and `CLAW_DESK_LOG_DIR` there so tests never read real credentials or write to `logs/`).
 
-`deploy/` holds the Oracle A1 deployment: `setup.sh` (Python 3.11+, venv, empty `.env` with mode 600 — credentials are typed on the server, never through a session), a systemd *user* unit running the scheduler with `--paper-orders`, and `README.md` with the steps (a two-stock log-only check first, then the service; the app only through an SSH tunnel; a Claude Code session on the server runs as a separate user with no sudo and no way into the admin's home, reading only `/srv/claw-desk` — where `logs/` and `state/` are moved and linked back — through ACLs, so it can never read `.env` or the admin's other repos). Decided Sept 28, 2026: deploy on the Oracle A1.
+`deploy/` holds the Oracle A1 deployment: `setup.sh` (Python 3.11+, venv, empty `.env` with mode 600 — credentials are typed on the server, never through a session), a systemd *user* unit running the scheduler with `--paper-orders`, and `README.md` with the steps (a two-stock log-only check first, then the service; the app only through an SSH tunnel; no Claude session runs on the server: the traces and state are copied to the PC with Termius's SFTP, into the gitignored `logs/server/`, and analyzed there). Decided Sept 28, 2026: deploy on the Oracle A1.
 
 `config.Settings` / `get_settings()` load everything from environment variables (OS env vars, falling back to `.env`) and provide a `.require(field)` that raises `ConfigError` with a clear message instead of the client failing deep inside a request. Every client accepts an optional `Settings`, `requests.Session`, and `DiskCache` in its constructor for testability — tests always inject a fake session and skip real network calls.
 
@@ -302,6 +273,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
   - `claude` has read-only ACLs on that folder, for existing and future files;
   - both checks passed: `.env` gives "Permission denied" to `claude`, and the traces are listed;
   - after the restart the service was running, and both links were in place.
+- **The server-side Claude user was dropped the same day.** The `claude` user was deleted; its leftover access entries are cleared with `setfacl -R -b` and `setfacl -R -k` on `/srv/claw-desk`. Analysis happens on the PC from copied traces (README section 6). `logs/` and `state/` stay in `/srv/claw-desk`, linked into the repo, so both `~/claw-agent-desk/logs/` and `/srv/claw-desk/logs/` reach the traces.
 
 **The first decision cycle on the A1 (Sept 28, 12:00–12:22 UTC, paper orders).** Read by the server session.
 - Only 2 of 22 stocks were decided: AMD aborted (gemma avoid vs nemotron hold), and GE was an agreed buy that the critic moved to hold.
@@ -345,7 +317,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - bias_2 moves to nemotron-3.5-lightning, and mistral-nemotron (retired) leaves every model list.
 - Log-only runs keep their own state file.
 - Keys are redacted from every error text the desk logs or sends.
-- A Claude Code session on the server runs as a separate user with no sudo, which can read only `/srv/claw-desk`.
+- No Claude Code session on the server. A separate `claude` user was set up, then deleted the same day; traces are copied to the PC and analyzed there.
 - analyst_1 fails over to gpt-oss-20b as soon as gemma can't be reached (an unusable answer still aborts). The delay is to be tuned later.
 
 **Next step:** the service is running on the A1 (status above); its first decision cycle is today at 14:00 CEST.
