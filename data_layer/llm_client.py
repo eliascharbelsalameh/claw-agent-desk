@@ -76,9 +76,13 @@ STREAM_RETRIES = 2
 # analysts and critic stayed as they are.
 # bias_1 moved off gemma (it would have checked analyst_1's own analysis) to
 # muse-glimmer, the only reliable model independent of both analysts' labs,
-# at the cost of sharing a model with the critic. bias_2 stays on
-# mistral-nemotron, reliable but only partly independent of analyst_2
-# ("produced by Mistral and optimised by NVIDIA"; see spec section 4).
+# at the cost of sharing a model with the critic. bias_2 stayed on
+# mistral-nemotron until Build retired it (410 Gone, dropped from /v1/models)
+# on Sept 28, 2026; it moved to nemotron-3.5-lightning, the only reliable
+# model left outside both analysts and bias_1 (it shares the Nemotron line
+# with analyst_2, as mistral-nemotron partly did). Lenient: on Sept 26 it
+# passed all 4 bias checks it answered, including three bias_1 had flagged,
+# at 3-6 minutes per check.
 # technical moved off kimi-k3, which answered 0 of 7 calls on Sept 25 (not
 # even a one-line prompt), to nemotron-3-super: reliable and a reasoning
 # model; sharing analyst_2's model matters less for a role that times
@@ -89,7 +93,7 @@ AGENT_MODELS = {
     "analyst_2": "nvidia/nemotron-3-super-120b-a12b",
     "critic": "meta/muse-glimmer-30b",
     "bias_1": "meta/muse-glimmer-30b",
-    "bias_2": "mistralai/mistral-nemotron",
+    "bias_2": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "technical": "nvidia/nemotron-3-super-120b-a12b",
 }
 
@@ -112,14 +116,19 @@ AGENT_MODELS = {
 # A backup that behaves like its primary can be listed here again; the
 # pipeline only lets it answer after the primary has been down for
 # pipeline.ANALYST_BACKUP_AFTER.
+#
+# mistral-nemotron left every list on Sept 28, 2026, when Build retired it.
+# Since then the critic and bias_1 have no usable backup (gemma, the critic's
+# other one, is analyst_1's model and always excluded): when muse-glimmer is
+# down they defer like an analyst.
 AGENT_MODEL_BACKUPS: dict[str, list[str]] = {
-    "macro": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
+    "macro": ["google/gemma-4-31b-it"],
     "analyst_1": [],
     "analyst_2": [],
-    "critic": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
-    "bias_1": ["mistralai/mistral-nemotron"],
+    "critic": ["google/gemma-4-31b-it"],
+    "bias_1": [],
     "bias_2": ["meta/muse-glimmer-30b"],
-    "technical": ["mistralai/mistral-nemotron", "google/gemma-4-31b-it"],
+    "technical": ["google/gemma-4-31b-it"],
 }
 
 

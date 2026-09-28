@@ -58,6 +58,13 @@ def test_analyst_candidate_lists_never_share_a_model():
 
 # --- health ---
 
+def test_bias_agents_run_on_models_of_their_own():
+    # bias_2 also excludes bias_1's model at call time, so its primary must differ
+    analysts = set(role_models("analyst_1")) | set(role_models("analyst_2"))
+    assert AGENT_MODELS["bias_1"] not in analysts and AGENT_MODELS["bias_2"] not in analysts
+    assert AGENT_MODELS["bias_1"] != AGENT_MODELS["bias_2"]
+
+
 def test_model_health_moves_failed_models_last_until_cooldown_or_success():
     now = [0.0]
     health = ModelHealth(cooldown_seconds=100, clock=lambda: now[0])
