@@ -14,7 +14,15 @@ bash setup.sh
 ```
 
 If the repo is private, clone it yourself first (`gh auth login` or a deploy key), then run
-`bash deploy/setup.sh` from inside the clone. The script installs git and Python 3.11+ (Ubuntu
+`bash deploy/setup.sh` from inside the clone. If you cloned it somewhere else, such as
+`~/repos/claw-agent-desk`, point the script at that clone and link it to `~/claw-agent-desk`, which
+is where the service unit and the commands below look:
+
+```bash
+cd ~/repos/claw-agent-desk && DESK_DIR=$PWD bash deploy/setup.sh
+ln -s ~/repos/claw-agent-desk ~/claw-agent-desk
+```
+ The script installs git and Python 3.11+ (Ubuntu
 22.04 ships 3.10, which can't parse Alpaca's nanosecond timestamps). It also creates `.venv`,
 installs `requirements.txt`, creates `.env` from `.env.example` with mode 600, and runs the tests.
 
@@ -98,17 +106,26 @@ calls and failures. The **Trace viewer** tab replays any day's trace.
 
 A Claude Code session can read every file its Unix user can read and run anything that user can run,
 so permission rules inside Claude Code aren't enough to keep the keys out of it. Run it as a separate
-user that has no sudo and can't read `.env`:
+user that has no sudo and no way into your home, and put the desk's logs and state where it can read
+them, outside your home. Don't give it a way through your home instead: files in your other repos
+are usually readable by any user who can reach them.
 
 ```bash
 # as your admin user (the one that runs the service), once
 sudo adduser --disabled-password --gecos "" claude   # no password, not in the sudo group
+chmod 750 ~                                           # other users can't enter your home (usually already so)
 sudo apt-get install -y acl
-# claude may pass through your home and the repo, and read logs/ and state/ - nothing else
-setfacl -m u:claude:x ~ ~/claw-agent-desk
-setfacl -R -m u:claude:rX ~/claw-agent-desk/logs ~/claw-agent-desk/state
-setfacl -m d:u:claude:rX ~/claw-agent-desk/logs ~/claw-agent-desk/state   # files created later too
+sudo install -d -o "$USER" -g "$USER" -m 750 /srv/claw-desk
+# move logs/ and state/ there; the desk keeps using them through links
+systemctl --user stop claw-desk-scheduler
+cd ~/claw-agent-desk && mv logs state /srv/claw-desk/
+ln -s /srv/claw-desk/logs logs && ln -s /srv/claw-desk/state state
+systemctl --user start claw-desk-scheduler
+# claude may read /srv/claw-desk, including files created later - nothing else of yours
+setfacl -R -m u:claude:rX /srv/claw-desk
+setfacl -d -m u:claude:rX /srv/claw-desk /srv/claw-desk/logs /srv/claw-desk/state
 sudo -u claude cat ~/claw-agent-desk/.env   # must fail with "Permission denied"
+sudo -u claude ls /srv/claw-desk/logs       # must list the traces
 ```
 
 Then start sessions as that user, in its own clone of the repo:
@@ -119,9 +136,9 @@ curl -fsSL https://claude.ai/install.sh | bash   # Claude Code for this user onl
 git clone https://github.com/eliascharbelsalameh/claw-agent-desk.git && cd claw-agent-desk && claude
 ```
 
-The session sees the code, plus the live traces and state in your `~/claw-agent-desk/logs` and
-`~/claw-agent-desk/state`. It can't see the keys, the data cache or anything else in your home, and it
-can't restart the service or use sudo; do those yourself. Never start `claude` from your admin account.
+The session reads the code in its own clone and the live traces and state in `/srv/claw-desk`. It
+can't enter your home, so it can't see the keys, the data cache or your other repos. It also can't
+use sudo or restart the service; do those yourself. Never start `claude` from your admin account.
 
 The desk also keeps the keys out of everything it writes. FRED and Finnhub take their keys in the URL,
 so error texts are redacted before they become data gaps (which the analysts see) or trace lines.
