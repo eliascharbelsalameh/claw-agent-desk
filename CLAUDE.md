@@ -293,7 +293,7 @@ Per-source clients, each a thin subclass of `BaseClient`:
 - **Where it lives:** the repo was cloned over SSH to `~/repos/claw-agent-desk` and linked as `~/claw-agent-desk`, which is where the unit and the README look.
 - **Setup:** `setup.sh` ran with `DESK_DIR`. `.env` was typed with nano (just the six lines) and the credential check showed all six present.
 - **The two-stock log-only check** (`--once decision --watchlist AAPL MSFT`) reached Build: a nemotron stream drop was retried. Both stocks ended deferred, with gemma flaky at the time.
-- **The service** has been running since 09:41 UTC (enabled, with linger). Its first decision cycle is at 14:00 CEST (08:00 ET).
+- **The service** has been running since 09:41 UTC (restarted at 10:16 UTC on `1eb437b`). It is enabled, with linger confirmed (`Linger=yes`), so it keeps running with no one connected and starts again after a reboot. Its first decision cycle is at 14:00 CEST (08:00 ET).
 - **Watching it:** the app is reached from the PC through a Termius local port forward, PC port 8502 to the server's 8501 (README section 5). The Desk state tab stays empty until that first cycle writes `state/desk_state.json`.
 - **Code changes** reach the server with `git pull --ff-only` and `systemctl --user restart claw-desk-scheduler`.
 - **Next:** the Claude user (section 6).

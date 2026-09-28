@@ -77,14 +77,37 @@ systemctl --user enable --now claw-desk-scheduler
 journalctl --user -u claw-desk-scheduler -f
 ```
 
-The unit runs with `--paper-orders`, so its orders go to the Alpaca **paper** account (the URL in
-`.env` is `paper-api.alpaca.markets`). Drop the flag in the unit for log-only.
+The unit runs with `--paper-orders`, so its orders go to the Alpaca **paper** account
+(`ALPACA_TRADING_BASE_URL`, which defaults to `paper-api.alpaca.markets`). Drop the flag in the unit for
+log-only.
 
 The scheduler wakes every minute. It runs the day's decision cycle at 08:00 ET, before the open,
 and retries deferred stocks every 30 minutes until 15:00 ET. It follows Alpaca's market clock, so
 weekends and holidays are skipped whatever the server's time zone is. Restarts are safe: the state
 file records what was already decided, and order ids are derived from the decision, so an order is
 never placed twice.
+
+Check that linger is on. Without it, the service stops when your last SSH session closes:
+
+```bash
+loginctl show-user "$USER" --property=Linger   # must print Linger=yes
+```
+
+**The service doesn't need you connected.** Closing Termius or shutting down your PC only ends what runs
+inside those sessions: the app, the tunnel, a Claude session. The scheduler keeps going on its own:
+
+- it runs the cycles and places the orders;
+- systemd restarts it within 30 seconds if it crashes (`Restart=always`);
+- it starts again by itself if the server reboots.
+
+Reconnecting doesn't trigger anything; you only look at what happened (section 5):
+
+```bash
+systemctl --user status claw-desk-scheduler                      # running, and since when
+journalctl --user -u claw-desk-scheduler --since "3 hours ago"   # what it logged meanwhile
+```
+
+Orders and positions also show on the Alpaca paper dashboard, from any device.
 
 ## 5. Watch it
 
@@ -102,6 +125,14 @@ With Termius on your PC, let Termius make the tunnel, so the key never leaves it
    cd ~/claw-agent-desk && .venv/bin/streamlit run ui/streamlit_app.py
    ```
 3. Open http://localhost:8502 on your PC.
+
+To keep the app running after you disconnect, start it inside `tmux`:
+
+1. Run `tmux new -s app`, then the `streamlit run` command.
+2. Press Ctrl+B then D to leave it running.
+3. Later, `tmux attach -t app` gets you back to it.
+
+The port-forward rule is then all you need to reopen it.
 
 With a key file on your PC instead, run `ssh -i <key file> -L 8502:localhost:8501 ubuntu@<public-ip>`
 and the same `streamlit run` in that session. The `ubuntu@instance-...` in the server's prompt is the
