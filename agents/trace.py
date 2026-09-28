@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from data_layer.http_utils import redact
+
 
 class TraceLogger:
     def __init__(self, path: str | Path):
@@ -32,7 +34,8 @@ class TraceLogger:
             "event": event,
             **payload,
         }
-        line = json.dumps(record, default=str, ensure_ascii=False)
+        # redact: a last guard in case an error text carrying a key-bearing URL gets here
+        line = redact(json.dumps(record, default=str, ensure_ascii=False))
         with self._lock, self._path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return record

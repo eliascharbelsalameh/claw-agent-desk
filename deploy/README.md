@@ -20,29 +20,43 @@ installs `requirements.txt`, creates `.env` from `.env.example` with mode 600, a
 
 ## 2. Credentials
 
+Log in as the user that runs the service and type them into `.env` with an editor:
+
 ```bash
 cd ~/claw-agent-desk && nano .env
 ```
 
 Fill in `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `FRED_API_KEY`, `FINNHUB_API_KEY`,
-`SEC_EDGAR_USER_AGENT` and `NVIDIA_API_KEY`. Type them on the server. Don't paste them into a
-chat or a Claude session. Check that each one is present without printing it:
+`SEC_EDGAR_USER_AGENT` and `NVIDIA_API_KEY`: each value right after its `=`, with no spaces around
+the `=`. The User-Agent contains a space, so quote it: `SEC_EDGAR_USER_AGENT="Your Name you@example.com"`.
+Save with Ctrl+O and Enter, then exit with Ctrl+X.
+
+Don't set them with `export` or `echo ... >> .env`, because anything typed on the command line ends up
+in your shell history. Don't paste them into a chat or a Claude session either (section 6 keeps a
+Claude session on this server away from them). Keep the file readable by you alone, and check that
+each credential is present without printing it:
 
 ```bash
+chmod 600 .env
 .venv/bin/python -c "from ui.support import credential_status; print(credential_status())"
 ```
 
 ## 3. Dry run first
 
-This runs one decision cycle for the next session with log-only orders (nothing is sent to Alpaca):
+A quick check that the server can reach every source and model: two stocks, log-only orders (nothing
+is sent to Alpaca), a few minutes:
 
 ```bash
-.venv/bin/python -m agents.scheduler --once decision
+.venv/bin/python -m agents.scheduler --once decision --watchlist AAPL MSFT
 ```
 
 It prints each stock's decision, anything deferred, and the orders it would have placed. The full
-trail is in `logs/trace-YYYYMMDD.jsonl`, and the state is in `state/desk_state.json`. To start over
-from scratch, delete `state/desk_state.json`.
+trail is in `logs/trace-YYYYMMDD.jsonl`. Drop `--watchlist` for the full 22-stock cycle (about an hour).
+
+A log-only run keeps its own state file, `state/desk_state-log-only.json`, separate from the service's
+`state/desk_state.json`. So the service never treats a session as already decided, and never acts on
+positions a log-only run only pretended to open. The scheduler refuses a state file that belongs to the
+other mode. To start a mode over from scratch, delete its state file.
 
 ## 4. Run it as a service
 
@@ -79,6 +93,38 @@ ssh -L 8501:localhost:8501 <user>@<instance-ip>    # then open http://localhost:
 
 The **Desk state** tab lists positions, deferred stocks, decisions and every pass, including LLM
 calls and failures. The **Trace viewer** tab replays any day's trace.
+
+## 6. A Claude Code session on the server
+
+A Claude Code session can read every file its Unix user can read and run anything that user can run,
+so permission rules inside Claude Code aren't enough to keep the keys out of it. Run it as a separate
+user that has no sudo and can't read `.env`:
+
+```bash
+# as your admin user (the one that runs the service), once
+sudo adduser --disabled-password --gecos "" claude   # no password, not in the sudo group
+sudo apt-get install -y acl
+# claude may pass through your home and the repo, and read logs/ and state/ - nothing else
+setfacl -m u:claude:x ~ ~/claw-agent-desk
+setfacl -R -m u:claude:rX ~/claw-agent-desk/logs ~/claw-agent-desk/state
+setfacl -m d:u:claude:rX ~/claw-agent-desk/logs ~/claw-agent-desk/state   # files created later too
+sudo -u claude cat ~/claw-agent-desk/.env   # must fail with "Permission denied"
+```
+
+Then start sessions as that user, in its own clone of the repo:
+
+```bash
+sudo -iu claude
+curl -fsSL https://claude.ai/install.sh | bash   # Claude Code for this user only; then log in
+git clone https://github.com/eliascharbelsalameh/claw-agent-desk.git && cd claw-agent-desk && claude
+```
+
+The session sees the code, plus the live traces and state in your `~/claw-agent-desk/logs` and
+`~/claw-agent-desk/state`. It can't see the keys, the data cache or anything else in your home, and it
+can't restart the service or use sudo; do those yourself. Never start `claude` from your admin account.
+
+The desk also keeps the keys out of everything it writes. FRED and Finnhub take their keys in the URL,
+so error texts are redacted before they become data gaps (which the analysts see) or trace lines.
 
 ## Updating
 

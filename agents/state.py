@@ -12,7 +12,9 @@ step in progress:
   horizon each one was bought for (the broker stays the source of truth for
   quantities; positions the desk didn't open are never touched);
 - `decisions` and `cycles`: a rolling log of final decisions and of what
-  every pass did, including LLM failures per hour.
+  every pass did, including LLM failures per hour;
+- `dry_run`: whether the scheduler that owns the file places no orders
+  (log-only) or paper orders - a file belongs to one mode (scheduler.py).
 """
 from __future__ import annotations
 
@@ -37,6 +39,9 @@ class DeskState:
     cycles: list[dict[str, Any]] = field(default_factory=list)
     # The trading session whose decision cycle already ran (YYYY-MM-DD).
     last_decision_session: str | None = None
+    # True for a log-only scheduler's file, False for a paper-order one's;
+    # None until a scheduler first claims it.
+    dry_run: bool | None = None
     version: int = STATE_VERSION
 
     @classmethod

@@ -1,9 +1,22 @@
+import json
 import time
 
 import pytest
 import requests
 
-from data_layer.http_utils import RateLimitExceeded, request_with_retry
+from data_layer.http_utils import RateLimitExceeded, redact, request_with_retry
+
+
+def test_redact_hides_keys_in_urls_and_leaves_the_rest():
+    text = ("HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: "
+            "/fred/series/observations?series_id=DGS10&api_key=abc123&file_type=json (Caused by x) "
+            "| 403 for url: https://finnhub.io/api/v1/company-news?symbol=AAPL&token=tok456")
+    out = redact(text)
+    assert "abc123" not in out and "tok456" not in out
+    assert "series_id=DGS10&api_key=***&file_type=json (Caused by x)" in out
+    assert out.endswith("symbol=AAPL&token=***")
+    # inside a JSON line the escaped quote after the value survives
+    assert json.loads(redact(json.dumps({"e": 'url "x?token=tok456"'}))) == {"e": 'url "x?token=***"'}
 
 
 class _FakeResponse:

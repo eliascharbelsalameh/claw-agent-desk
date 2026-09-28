@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Any
 
@@ -17,6 +18,16 @@ import requests
 logger = logging.getLogger(__name__)
 
 RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# FRED and Finnhub take their keys in the query string, and requests puts the
+# full URL into its error messages, which the desk turns into data gaps that
+# are logged, saved and sent to the analysts.
+_SECRET_PARAMS = re.compile(r"((?:api_key|token)=)[^&\s'\"\\]+")
+
+
+def redact(text: str) -> str:
+    """`text` with the values of key-bearing query parameters replaced by ***."""
+    return _SECRET_PARAMS.sub(r"\1***", text)
 
 # Dropped connections are retried like 5xxs: NVIDIA Build in particular
 # closes connections without a response under load (seen live, Sept 2026).

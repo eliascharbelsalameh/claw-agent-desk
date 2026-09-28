@@ -58,6 +58,12 @@ DECISION_TIME_ET = time(8, 0)
 RETRY_EVERY = timedelta(minutes=30)
 RETRY_UNTIL_ET = time(15, 0)
 POLL_SECONDS = 60
+# A state file belongs to one mode. A log-only run's file must never steer
+# a scheduler that places paper orders: it would skip the session the log-only
+# run already decided, and later sell shares that were never bought (Sept 28,
+# 2026: the README's dry run and the service shared one file).
+PAPER_STATE = "state/desk_state.json"
+LOG_ONLY_STATE = "state/desk_state-log-only.json"
 # Stocks going through the desk at once in a decision cycle, so the whole
 # watchlist is decided before the 09:30 open (about 9 minutes per stock on
 # a slow Build morning). Build's ceiling is 40 requests/minute per model;
@@ -65,6 +71,10 @@ POLL_SECONDS = 60
 WORKERS = 4
 
 DECISION, RETRY, IDLE = "decision", "retry", "idle"
+
+
+def default_state_path(paper_orders: bool) -> str:
+    return PAPER_STATE if paper_orders else LOG_ONLY_STATE
 
 
 def session_for(clock: dict[str, Any]) -> str:
@@ -98,11 +108,24 @@ class DeskScheduler:
         self.dry_run = dry_run
         self._now = now
         self.state = DeskState.load(self.state_path)
+        self._claim_state()
         # When the last pass (decision or retry) ended: a retry waits
         # RETRY_EVERY after it, so a Build outage has time to clear.
         self._last_pass: datetime | None = None
 
     # --- plumbing ---
+
+    def _claim_state(self) -> None:
+        """Refuse a state file written in the other mode (see PAPER_STATE)."""
+        recorded = self.state.dry_run
+        if recorded is None and self.state.cycles:  # written before the mode was recorded
+            recorded = bool(self.state.cycles[-1].get("dry_run"))
+        if recorded is not None and recorded != self.dry_run:
+            raise ValueError(
+                f"{self.state_path} belongs to a {'log-only' if recorded else 'paper-order'} scheduler; "
+                f"give this run its own --state (defaults: {PAPER_STATE} with --paper-orders, "
+                f"{LOG_ONLY_STATE} without)")
+        self.state.dry_run = self.dry_run
 
     def _trace(self) -> TraceLogger:
         return TraceLogger(default_trace_path(self.log_dir))
@@ -242,7 +265,8 @@ class DeskScheduler:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m agents.scheduler", description=__doc__.split("\n\n")[0])
     parser.add_argument("--watchlist", nargs="+", default=list(DEFAULT_WATCHLIST))
-    parser.add_argument("--state", default="state/desk_state.json")
+    parser.add_argument("--state", help=f"state file (default: {PAPER_STATE} with --paper-orders, "
+                                        f"{LOG_ONLY_STATE} without, so the two never share one)")
     parser.add_argument("--log-dir", default="logs")
     parser.add_argument("--paper-orders", action="store_true",
                         help="send the orders to the Alpaca paper account (default: log only)")
@@ -250,15 +274,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", choices=(DECISION, RETRY),
                         help="run one decision cycle or retry pass now for the current session, then exit")
     args = parser.parse_args(argv)
+    state_path = args.state or default_state_path(args.paper_orders)
 
     broker = AlpacaClient()
 
     def factory(trace: TraceLogger, outages: ModelOutages) -> DeskPipeline:
         return DeskPipeline.from_settings(trace=trace, outages=outages)
 
-    scheduler = DeskScheduler(broker=broker, pipeline_factory=factory, state_path=args.state,
-                              log_dir=args.log_dir, watchlist=tuple(args.watchlist),
-                              dry_run=not args.paper_orders, workers=args.workers)
+    try:
+        scheduler = DeskScheduler(broker=broker, pipeline_factory=factory, state_path=state_path,
+                                  log_dir=args.log_dir, watchlist=tuple(args.watchlist),
+                                  dry_run=not args.paper_orders, workers=args.workers)
+    except ValueError as exc:  # a state file of the other mode, or of another version
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.once:
         session = session_for(broker.get_clock())
         run = scheduler.decision_cycle if args.once == DECISION else scheduler.retry_pass
@@ -272,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {order}")
         return 0
     print(f"Scheduler running: watchlist {', '.join(scheduler.watchlist)}; "
-          f"{'paper orders' if args.paper_orders else 'log-only orders'}; state {args.state}", flush=True)
+          f"{'paper orders' if args.paper_orders else 'log-only orders'}; state {state_path}", flush=True)
     scheduler.run_forever()
     return 0
 

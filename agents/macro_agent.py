@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable
 
 from data_layer.alpaca_client import session_in_progress
+from data_layer.http_utils import redact
 from data_layer.llm_client import DEFAULT_MODEL_HEALTH, ModelHealth, role_models
 
 from .computed_facts import (
@@ -555,7 +556,7 @@ class MacroContextAgent:
                     pct_change=series_id in PERCENT_CHANGE_SERIES,
                 )
             except Exception as exc:  # noqa: BLE001 - any source failure becomes a data gap
-                gaps.append(f"macro {series_id}: {type(exc).__name__}: {exc}")
+                gaps.append(redact(f"macro {series_id}: {type(exc).__name__}: {exc}"))
                 continue
             if summary is None:
                 gaps.append(f"macro {series_id}: no observations")
@@ -583,7 +584,7 @@ class MacroContextAgent:
             try:
                 return fn()
             except Exception as exc:  # noqa: BLE001 - any source failure becomes a data gap
-                ctx.data_gaps.append(f"{label}: {type(exc).__name__}: {exc}")
+                ctx.data_gaps.append(redact(f"{label}: {type(exc).__name__}: {exc}"))
                 return None
 
         daily = attempt(

@@ -2,10 +2,22 @@
 import json
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from agents.bias_agent import BIAS_SOLO_AFTER, BiasCheck
 from agents.macro_agent import SharedContext, StockContext
 from agents.pipeline import DeskPipeline
-from agents.scheduler import DECISION, IDLE, RETRY, RETRY_EVERY, DeskScheduler, session_for
+from agents.scheduler import (
+    DECISION,
+    IDLE,
+    LOG_ONLY_STATE,
+    PAPER_STATE,
+    RETRY,
+    RETRY_EVERY,
+    DeskScheduler,
+    default_state_path,
+    session_for,
+)
 from agents.state import DeskState
 from tests.fakes import FakeAnalyst, FakeBias, FakeCritic, _verdict
 from tests.test_portfolio import FakeBroker
@@ -187,6 +199,30 @@ def test_next_day_expires_stale_pending_and_revisits_held_stocks(tmp_path):
     trace = [json.loads(l) for l in next((tmp_path / "logs").glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
     start = next(e for e in trace if e["event"] == "cycle_start")
     assert start["expired_pending"] == ["AAPL"] and start["symbols"] == ["NVDA", "AMD"]
+
+
+def test_log_only_and_paper_runs_default_to_separate_state_files():
+    assert default_state_path(paper_orders=True) == PAPER_STATE == "state/desk_state.json"
+    assert default_state_path(paper_orders=False) == LOG_ONLY_STATE != PAPER_STATE
+
+
+def test_a_state_file_belongs_to_one_mode(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    log_only = _scheduler(tmp_path, broker, box, watchlist=("MSFT",), dry_run=True)
+    log_only.decision_cycle("2026-09-28")
+    state = DeskState.load(tmp_path / "state.json")
+    assert state.dry_run is True and state.positions["MSFT"]["dry_run"] and broker.submitted == []
+    # a paper-order scheduler on that file would skip today and later sell MSFT it never bought
+    with pytest.raises(ValueError, match="state.json belongs to a log-only scheduler"):
+        _scheduler(tmp_path, broker, box, dry_run=False)
+    assert _scheduler(tmp_path, broker, box, dry_run=True).state.dry_run is True
+
+
+def test_a_state_file_from_before_the_mode_was_recorded_is_judged_by_its_cycles(tmp_path):
+    DeskState(cycles=[{"kind": "decision", "dry_run": False}]).save(tmp_path / "state.json")
+    with pytest.raises(ValueError, match="belongs to a paper-order scheduler"):
+        _scheduler(tmp_path, FakeBroker(), {"clock": PRE_MARKET, "now": T0}, dry_run=True)
 
 
 def test_weekend_is_idle(tmp_path):

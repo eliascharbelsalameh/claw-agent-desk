@@ -299,6 +299,21 @@ def test_benchmark_and_calendar_failures_become_gaps():
     assert "vs_spy: no SPY bars" in ctx.technicals["unavailable"]
 
 
+def test_a_key_in_a_failed_url_never_reaches_the_gaps_or_the_trace(tmp_path):
+    class LeakyFred(FakeFred):
+        def get_series_observations(self, series_id, start_date=None, end_date=None):
+            raise ConnectionError(f"Max retries exceeded with url: /fred/series/observations?"
+                                  f"series_id={series_id}&api_key=SECRET123&file_type=json")
+
+    trace = TraceLogger(tmp_path / "t.jsonl")
+    agent = _agent(trace=trace)
+    agent._fred = LeakyFred()
+    ctx = agent.run(["AAPL"])["AAPL"]
+    assert any("api_key=***&file_type=json" in g for g in ctx.data_gaps)
+    assert "SECRET123" not in " ".join(ctx.data_gaps)
+    assert "SECRET123" not in trace.path.read_text(encoding="utf-8")
+
+
 def test_old_frozen_contexts_still_load():
     # contexts saved before the computed blocks existed (the wide test's)
     old = {"symbol": "AAPL", "generated_at": NOW.isoformat(), "macro": {}, "price": {"last_close": 1.0}}
