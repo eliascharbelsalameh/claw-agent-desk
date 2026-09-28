@@ -55,6 +55,35 @@ powershell -c "[Environment]::GetEnvironmentVariable('NVIDIA_API_KEY','User').Le
 
 Note that a shell started *before* a `setx` won't see the new value — an existing session's Bash tool may report a var as unset when it's actually set. Read `HKCU\Environment` (via PowerShell or Python's `winreg`) to check reliably, or have one-off live scripts load from there directly.
 
+## If you're the Claude session on the A1 server
+
+On the Oracle A1 instance (`instance-20260602-0216`), a Claude Code session runs as the Linux user `claude`, in its own clone (`/home/claude/claw-agent-desk`), set up by `deploy/README.md` section 6. If that's you (`whoami` prints `claude`):
+
+- **No keys, no sudo, no access to `/home/ubuntu`.** Anything that calls an API fails for lack of credentials: live runs (`python -m agents ...`, `--once`), the app's Run button, model probes. Don't try them. Never look for keys or ask for them to be pasted in.
+- **The live data, read-only:**
+  - Traces: `/srv/claw-desk/logs/trace-YYYYMMDD.jsonl` (the date is in UTC).
+  - The service's state: `/srv/claw-desk/state/desk_state.json`. Log-only runs write `desk_state-log-only.json` there.
+  - If section 6's optional links were made, both folders also appear as `logs/` and `state/` in this clone.
+  - In the state, `cycles[-1]` summarizes the last pass: decisions, deferred stocks, orders, and LLM calls and failures by UTC hour. `pending[symbol].reason` says why a stock is waiting.
+  - `agents.trace.read_trace`, `summarize_trace` and `failures_by_hour` read the traces.
+- **The service:**
+  - `claw-desk-scheduler` is a systemd user unit of `ubuntu`. It runs `/home/ubuntu/repos/claw-agent-desk` (linked as `~/claw-agent-desk`) with `--paper-orders`.
+  - This session can't see its journal, restart it or reach Alpaca; the user does all that as `ubuntu`.
+  - Code changes go through the PC session and GitHub. On the server the user runs `git pull --ff-only && systemctl --user restart claw-desk-scheduler` as `ubuntu`, never during a pass.
+  - This clone can't push. Analyze, don't edit, and leave tracked files unchanged so `git pull --ff-only` keeps working.
+- **Daily schedule (CEST):**
+  - decision cycle at 14:00 (08:00 ET, 12:00 UTC);
+  - its orders queue for the 15:30 open;
+  - retry passes every 30 minutes until 21:00;
+  - the state file is written at the end of each pass;
+  - a Monday buy is sold at Thursday's open (3 sessions).
+- **Watch for:**
+  - gemma dropping calls, which leaves stocks deferred;
+  - bias_2 on nemotron-3.5-lightning, which is lenient and slow;
+  - a model answering 410, which means it has been retired. This session can't check `/v1/models`, so tell the user.
+- **Security:** traces mask `api_key=` and `token=` values (`http_utils.redact`). A readable key anywhere in a trace or the state is a leak: report it at once, because the key needs rotating.
+- **Don't run `/init`.** This file is maintained from the PC session.
+
 ## Architecture
 
 `data_layer/` is a set of thin, independent clients for each data source in the spec (section 5), sharing plumbing so retry/caching behavior is identical everywhere rather than reimplemented per client:
