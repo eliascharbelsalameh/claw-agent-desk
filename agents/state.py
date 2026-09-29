@@ -11,6 +11,11 @@ step in progress:
 - `positions`: the paper positions the desk opened itself, with the
   horizon each one was bought for (the broker stays the source of truth for
   quantities; positions the desk didn't open are never touched);
+- `unsent`: the session's final decisions whose orders haven't gone out
+  yet ({"session", "check_horizons", "decisions"}). A pass saves each
+  decision as it settles but sends the orders at its end, so a restart or a
+  broker failure in between would otherwise lose them; the next tick sends
+  them instead;
 - `decisions` and `cycles`: a rolling log of final decisions and of what
   every pass did, including LLM failures per hour;
 - `dry_run`: whether the scheduler that owns the file places no orders
@@ -35,6 +40,7 @@ class DeskState:
     outages: dict[str, str] = field(default_factory=dict)
     pending: dict[str, dict[str, Any]] = field(default_factory=dict)
     positions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    unsent: dict[str, Any] | None = None
     decisions: list[dict[str, Any]] = field(default_factory=list)
     cycles: list[dict[str, Any]] = field(default_factory=list)
     # The trading session whose decision cycle already ran (YYYY-MM-DD).

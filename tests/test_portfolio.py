@@ -30,7 +30,8 @@ class FakeBroker:
             raise ConnectionError("broker down")
         if client_order_id in self.orders:
             raise RuntimeError("422 client_order_id must be unique")
-        order = {"id": f"order-{len(self.orders) + 1}", "status": "accepted", "client_order_id": client_order_id}
+        order = {"id": f"order-{len(self.orders) + 1}", "status": "accepted", "client_order_id": client_order_id,
+                 "qty": str(qty)}
         self.orders[client_order_id] = order
         return order
 
@@ -51,7 +52,8 @@ def _decision(symbol, outcome="agree", rec="buy", price=100.0, gates=None):
 def _run_step(portfolio, decisions, positions, check_horizons=True, session=SESSION):
     plans, notes = portfolio.plan(decisions, positions, session=session, check_horizons=check_horizons)
     results = portfolio.execute(plans)
-    portfolio.record(positions, decisions, results, notes, session=session)
+    portfolio.record(positions, decisions, results, notes, session=session,
+                     horizon_end=portfolio.horizon_end(session))
     return plans, notes, results
 
 
@@ -159,6 +161,40 @@ def test_position_missing_at_the_broker_is_dropped_when_it_should_be_sold():
     positions = {"AAPL": {"qty": 5, "entry_session": "2026-09-21", "horizon_end": SESSION}}
     _, notes, _ = _run_step(Portfolio(FakeBroker(), dry_run=False), [], positions)
     assert "not at the broker" in notes[0]["note"] and positions == {}
+
+
+def test_a_buy_that_never_filled_is_dropped_and_the_stock_can_be_bought_again():
+    positions = {"LLY": {"qty": 8, "entry_session": "2026-09-25", "horizon_end": "2026-09-30"},
+                 "PG": {"qty": 60, "entry_session": SESSION, "horizon_end": "2026-10-01"}}
+    plans, notes, _ = _run_step(Portfolio(FakeBroker(), dry_run=False), [_decision("LLY")], positions)
+    assert [(p.symbol, p.side) for p in plans] == [("LLY", "buy")]  # not taken for a re-affirmed holding
+    assert [n["symbol"] for n in notes] == ["LLY"] and "not at the broker" in notes[0]["note"]
+    assert positions["LLY"]["entry_session"] == SESSION  # the new buy's record, not the phantom's
+    assert "PG" in positions  # bought this session: may still be waiting for the open
+
+
+def test_no_buy_once_the_market_has_closed_but_sells_still_go():
+    broker = FakeBroker(positions=[{"symbol": "NFLX", "qty": "12"}])
+    positions = {"NFLX": {"qty": 12, "entry_session": "2026-09-25", "horizon_end": "2026-10-02"}}
+    portfolio = Portfolio(broker, dry_run=False)
+    decisions = [_decision("AAPL"), _decision("NFLX", "agree", "avoid")]
+    plans, notes = portfolio.plan(decisions, positions, session=SESSION, check_horizons=False, buys_allowed=False)
+    assert [(p.symbol, p.side) for p in plans] == [("NFLX", "sell")]
+    assert notes == [{"symbol": "AAPL", "note": "agreed buy, but the market has closed for this session - not sent"}]
+
+
+def test_an_order_sent_before_its_record_was_saved_is_kept_after_it_filled():
+    broker = FakeBroker()
+    portfolio = Portfolio(broker, dry_run=False)
+    plans, _ = portfolio.plan([_decision("AAPL")], {}, session=SESSION, check_horizons=True)
+    portfolio.execute(plans)  # ... and the pass is cut short before record()
+    broker.positions = [{"symbol": "AAPL", "qty": "98"}]  # filled at the open
+    broker.account["cash"] = "90000"
+    positions = {}
+    plans, notes, results = _run_step(portfolio, [_decision("AAPL", price=90.0)], positions)
+    assert notes == []  # not mistaken for a position held outside the desk
+    assert results[0]["duplicate"] is True and results[0]["qty"] == 98 and len(broker.orders) == 1
+    assert positions["AAPL"]["qty"] == 98 and positions["AAPL"]["order_id"] == "order-1"
 
 
 def test_client_order_id_is_deterministic():

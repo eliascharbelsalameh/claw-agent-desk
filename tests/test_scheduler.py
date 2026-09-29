@@ -11,6 +11,7 @@ from agents.scheduler import (
     DECISION,
     IDLE,
     LOG_ONLY_STATE,
+    ORDERS,
     PAPER_STATE,
     RETRY,
     RETRY_EVERY,
@@ -189,6 +190,74 @@ def test_restart_keeps_the_days_work(tmp_path):
     box["now"] = T0 + timedelta(minutes=1)
     assert restarted.tick() == RETRY  # a fresh process retries pending work at once
     assert len(broker.submitted) == 1  # MSFT was not bought twice
+
+
+def _fail(*args, **kwargs):
+    raise ConnectionError("alpaca down")
+
+
+def test_orders_that_fail_are_sent_next_tick_without_rerunning_the_desk(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _scheduler(tmp_path, broker, box)
+    broker.get_calendar, calendar = _fail, broker.get_calendar
+    with pytest.raises(ConnectionError):
+        sched.tick()
+    assert broker.submitted == []  # the calendar is read before any order goes out
+    state = DeskState.load(tmp_path / "state.json")
+    assert state.last_decision_session == "2026-09-28"  # decided: not re-run
+    assert state.unsent["check_horizons"] is True
+    assert [d["symbol"] for d in state.unsent["decisions"]] == ["MSFT", "NVDA"]
+
+    broker.get_calendar = calendar
+    restarted = _scheduler(tmp_path, broker, box)
+    assert restarted.tick() == ORDERS
+    assert broker.submitted == [("MSFT", 98, "buy", "desk-2026-09-28-MSFT-buy")]
+    assert restarted.state.unsent is None and set(restarted.state.positions) == {"MSFT"}
+    assert [d["symbol"] for d in restarted.state.decisions] == ["MSFT", "NVDA"]  # logged once
+
+
+def test_a_retry_pass_cut_short_keeps_its_decisions_for_the_next_tick(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _scheduler(tmp_path, broker, box, watchlist=("MSFT",))
+    ScriptedAnalyst.down_once = {"MSFT"}
+    assert sched.tick() == DECISION and set(sched.state.pending) == {"MSFT"}
+
+    box["clock"], box["now"] = MIDDAY, T0 + RETRY_EVERY
+    broker.get_account, account = _fail, broker.get_account
+    with pytest.raises(ConnectionError):
+        sched.tick()  # MSFT is decided (agreed buy), then the broker fails
+    state = DeskState.load(tmp_path / "state.json")
+    assert state.pending == {} and [d["symbol"] for d in state.unsent["decisions"]] == ["MSFT"]
+    assert state.unsent["check_horizons"] is False
+
+    broker.get_account = account
+    assert _scheduler(tmp_path, broker, box, watchlist=("MSFT",)).tick() == ORDERS
+    assert broker.submitted == [("MSFT", 98, "buy", "desk-2026-09-28-MSFT-buy")]
+
+
+def test_a_retry_pass_ending_after_the_close_sends_no_buy(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _scheduler(tmp_path, broker, box, watchlist=("MSFT",))
+    ScriptedAnalyst.down_once = {"MSFT"}
+    sched.tick()
+    box["clock"] = AFTER_CLOSE  # the pass started before 15:00 ET and ran past 16:00
+    summary = sched.retry_pass("2026-09-28")
+    assert broker.submitted == [] and sched.state.positions == {} and sched.state.unsent is None
+    assert summary["orders"] == [{"note": {"symbol": "MSFT", "note": "agreed buy, but the market has closed "
+                                                                     "for this session - not sent"}}]
+
+
+def test_unsent_decisions_of_an_earlier_session_are_dropped(tmp_path):
+    sched = _scheduler(tmp_path, FakeBroker(), {"clock": PRE_MARKET, "now": T0}, watchlist=("NVDA",))
+    sched.state.unsent = {"session": "2026-09-25", "check_horizons": False,
+                          "decisions": [{"symbol": "LLY"}]}
+    sched.decision_cycle("2026-09-28")
+    trace = [json.loads(l) for l in next((tmp_path / "logs").glob("*.jsonl")).read_text(encoding="utf-8").splitlines()]
+    assert next(e for e in trace if e["event"] == "cycle_start")["expired_unsent"] == ["LLY"]
+    assert sched.state.unsent is None
 
 
 def test_next_day_expires_stale_pending_and_revisits_held_stocks(tmp_path):

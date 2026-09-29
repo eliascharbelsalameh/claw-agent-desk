@@ -16,6 +16,9 @@ Every trading day (Alpaca's market clock decides what one is):
   Build failure resume from the failed step with the morning's context.
   A stock still deferred after that waits for the next day's fresh cycle -
   its context would be stale by then.
+A final decision is saved as it settles, and its orders go out at the end
+of the pass. If they can't (a restart, a broker failure), the next tick
+sends them - the desk is never re-run for orders it already decided.
 Every pass is saved to the state file (agents/state.py) and summarized in
 the trace and the state, including LLM successes and failures per UTC hour.
 """
@@ -70,7 +73,7 @@ LOG_ONLY_STATE = "state/desk_state-log-only.json"
 # four stocks (at most two calls each at a time) keep well under it.
 WORKERS = 4
 
-DECISION, RETRY, IDLE = "decision", "retry", "idle"
+DECISION, RETRY, ORDERS, IDLE = "decision", "retry", "orders", "idle"
 
 
 def default_state_path(paper_orders: bool) -> str:
@@ -141,8 +144,8 @@ class DeskScheduler:
     # --- one scheduling step ---
 
     def tick(self) -> str:
-        """Do whatever is due now: the day's decision cycle, a retry pass,
-        or nothing. Returns which."""
+        """Do whatever is due now: the day's decision cycle, the orders of a
+        pass that was cut short, a retry pass, or nothing. Returns which."""
         clock = self._broker.get_clock()
         now_et = datetime.fromisoformat(clock["timestamp"])
         session = session_for(clock)
@@ -151,6 +154,9 @@ class DeskScheduler:
         if self.state.last_decision_session != session and now_et.time() >= DECISION_TIME_ET:
             self.decision_cycle(session)
             return DECISION
+        if self.state.unsent and self.state.unsent["session"] == session:
+            self.send_unsent(session)
+            return ORDERS
         if self.state.pending and now_et.time() < RETRY_UNTIL_ET and (
             self._last_pass is None or self._now() - self._last_pass >= RETRY_EVERY
         ):
@@ -179,15 +185,18 @@ class DeskScheduler:
         expired = self._expire_pending(session)
         symbols = list(dict.fromkeys([*self.watchlist, *sorted(self.state.positions)]))
         trace.log(AGENT_NAME, "cycle_start", {"kind": DECISION, "session": session, "symbols": symbols,
-                                              "expired_pending": expired})
+                                              "expired_pending": expired, "expired_unsent": self._expire_unsent(session)})
+        self._unsent(session)["check_horizons"] = True  # horizon exits are due even if every stock is deferred
         decisions = []
         for run in pipeline.run(symbols, workers=self.workers):
             decision = self._settle(run, session)
             if decision is not None:
                 decisions.append(decision)
-        self._save(pipeline)
-        orders = self._act(decisions, session, trace, check_horizons=True)
+        # Decided from here on: if the orders fail, the next tick sends them
+        # rather than re-running the whole desk (an hour and ~1M tokens).
         self.state.last_decision_session = session
+        self._save(pipeline)
+        orders = self._act(session, trace)
         return self._finish(DECISION, session, started, trace, pipeline, decisions, orders)
 
     def retry_pass(self, session: str) -> dict[str, Any]:
@@ -197,22 +206,47 @@ class DeskScheduler:
         pipeline = self._pipeline(trace)
         expired = self._expire_pending(session)
         trace.log(AGENT_NAME, "cycle_start", {"kind": RETRY, "session": session,
-                                              "symbols": sorted(self.state.pending), "expired_pending": expired})
+                                              "symbols": sorted(self.state.pending), "expired_pending": expired,
+                                              "expired_unsent": self._expire_unsent(session)})
         decisions = []
         for symbol in sorted(self.state.pending):
             run = pipeline.resume_symbol(SymbolRun.from_dict(self.state.pending[symbol]["run"]))
             decision = self._settle(run, session)
             if decision is not None:
                 decisions.append(decision)
-            self._save(pipeline)
-        orders = self._act(decisions, session, trace, check_horizons=False)
+            self._save(pipeline)  # the decision and its place in `unsent` survive a restart
+        orders = self._act(session, trace)
         return self._finish(RETRY, session, started, trace, pipeline, decisions, orders)
+
+    def send_unsent(self, session: str) -> list[dict[str, Any]]:
+        """Send the orders of decisions a pass settled but didn't act on."""
+        trace = self._trace()
+        symbols = [d["symbol"] for d in self.state.unsent["decisions"]]
+        orders = self._act(session, trace)
+        trace.log(AGENT_NAME, "unsent_orders", {"session": session, "symbols": symbols, "orders": orders})
+        print(f"orders for session {session} sent after an interrupted pass: {len(symbols)} decisions, "
+              f"{sum(1 for o in orders if 'side' in o)} orders", flush=True)
+        return orders
 
     def _expire_pending(self, session: str) -> list[str]:
         stale = [s for s, item in self.state.pending.items() if item["session"] != session]
         for symbol in stale:
             del self.state.pending[symbol]
         return stale
+
+    def _expire_unsent(self, session: str) -> list[str]:
+        """Decisions of an earlier session never acted on are dropped: the
+        market has moved on, and today's cycle decides afresh."""
+        unsent = self.state.unsent
+        if unsent is None or unsent["session"] == session:
+            return []
+        self.state.unsent = None
+        return [d["symbol"] for d in unsent["decisions"]]
+
+    def _unsent(self, session: str) -> dict[str, Any]:
+        if self.state.unsent is None or self.state.unsent["session"] != session:
+            self.state.unsent = {"session": session, "check_horizons": False, "decisions": []}
+        return self.state.unsent
 
     def _settle(self, run: SymbolRun, session: str) -> Decision | None:
         """A deferred run goes (back) to pending; anything else is final."""
@@ -226,17 +260,32 @@ class DeskScheduler:
         self.state.pending.pop(run.symbol, None)
         decision = Decision.from_run(run, session, now)
         self.state.decisions.append(decision.to_dict())
+        self._unsent(session)["decisions"].append(decision.to_dict())
         return decision
 
-    def _act(self, decisions: list[Decision], session: str, trace: TraceLogger, *,
-             check_horizons: bool) -> list[dict[str, Any]]:
+    def _act(self, session: str, trace: TraceLogger) -> list[dict[str, Any]]:
+        """Orders for the session's unsent decisions. Everything that can
+        fail is read before the first order goes out; a failure then leaves
+        the decisions in `unsent` for the next tick."""
+        batch = self.state.unsent
+        if batch is None or batch["session"] != session:
+            return []
+        decisions = [Decision(**d) for d in batch["decisions"]]
         portfolio = Portfolio(self._broker, trace=trace, dry_run=self.dry_run)
+        horizon_end = portfolio.horizon_end(session)
         plans, notes = portfolio.plan(decisions, self.state.positions, session=session,
-                                      check_horizons=check_horizons)
+                                      check_horizons=batch["check_horizons"], buys_allowed=self._buys_allowed(session))
         results = portfolio.execute(plans)
-        portfolio.record(self.state.positions, decisions, results, notes, session=session)
+        portfolio.record(self.state.positions, decisions, results, notes, session=session, horizon_end=horizon_end)
+        self.state.unsent = None
         self._save()  # right away: orders were just sent
         return results + [{"note": n} for n in notes]
+
+    def _buys_allowed(self, session: str) -> bool:
+        """False once the session's market has closed (a retry pass can run
+        past 16:00 ET): a day order sent then waits for the next open, on a
+        decision made for a session that is over."""
+        return session_for(self._broker.get_clock()) == session
 
     def _finish(self, kind: str, session: str, started: datetime, trace: TraceLogger,
                 pipeline: DeskPipeline, decisions: list[Decision], orders: list[dict[str, Any]]) -> dict[str, Any]:
