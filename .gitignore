@@ -6,3 +6,5 @@ __pycache__/
 .venv/
 /logs
 /state
+# Local demo assets (video thumbnails), kept out of the repo
+/Claw Agent Desk * YouTube thumbnails*.png

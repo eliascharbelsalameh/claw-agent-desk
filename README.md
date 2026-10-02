@@ -27,7 +27,7 @@ Both diagrams are generated from the live code (`ui/diagrams.py`) — every mode
 3. **Cross-check and critic** — the two verdicts must match exactly to proceed. Buy vs. hold goes to a critic (a third model) that challenges both analysts without ever giving its own recommendation; they reconsider and re-vote, up to 2 rounds. Buy vs. avoid aborts immediately — two analysts pointing opposite directions is not a call the desk will act on.
 4. **Bias gate** (agreed buys only) — two more models independently check the case for being news-driven, resting on stale news, or chasing a recent move. A veto needs *both* to flag it; a single flag is recorded but doesn't stop the buy.
 5. **Technical agent** (surviving buys only) — reads the 4-hour trend and the 1-hour chart to decide whether to enter now or wait for a specific chart-based reason. It can delay a buy; it can never create one.
-6. **Portfolio** — an agreed, ungated, timed buy opens a position sized at 10% of account equity (whole shares, max 8 positions, no margin). A position is sold on an agreed avoid or when its 3-session holding period ends. Orders carry a deterministic `client_order_id`, so a retried submission is recognized rather than duplicated.
+6. **Portfolio** — an agreed, ungated, timed buy opens a position sized at 10% of account equity (whole shares, max 8 positions, no margin). A position is sold on an agreed avoid or when its 5-session holding period ends (the far end of the analysts' 2–5 day horizon). Orders carry a deterministic `client_order_id`, so a retried submission is recognized rather than duplicated.
 
 ### What's deliberately *not* here
 

@@ -42,10 +42,11 @@ AGENT_NAME = "portfolio"
 
 POSITION_FRACTION = 0.10
 MAX_POSITIONS = 8
-# Decided Sept 26, 2026: 3 sessions (inside the analysts' 2-5 day horizon),
-# so a position opened on the first day of the demo run is also closed
-# before the Oct 2 deadline - bought at Monday's open, sold at Thursday's.
-HOLDING_SESSIONS = 3
+# Decided Oct 2, 2026: 5 sessions, the far end of the analysts' 2-5 day
+# horizon, so a buy is held for the whole window it was judged on. It was 3
+# from Sept 26 so a first-day buy would also close before the Oct 2
+# deadline. A position keeps the end it was bought with.
+HOLDING_SESSIONS = 5
 # Orders are sized on the last close but fill at the next open: keep a
 # margin so a gap up doesn't push the order past the cash available.
 PRICE_BUFFER = 1.02
