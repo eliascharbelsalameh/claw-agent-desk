@@ -61,7 +61,8 @@ Full day-by-day findings, every model swap and why, and the live trading log are
 
 - `data_layer/` — thin, retry-aware clients for Alpaca, FRED, SEC EDGAR, Finnhub and NVIDIA Build, sharing one HTTP-retry/caching core.
 - `agents/` — the pipeline: macro/context, the two analysts, cross-check, critic loop, bias gate, technical agent, portfolio, scheduler, state.
-- `ui/` — the Streamlit app: a live run viewer, desk-state and trace viewers, and the architecture/flow diagrams above.
+- `ui/` — the Streamlit app: a live run viewer, desk-state and trace viewers, a Positions tab (every trade on its price chart with the decision behind the buy and the sale), and the architecture/flow diagrams above.
+- `demo/` — a frozen snapshot of the desk's trades (`python -m ui.snapshot`), so the Positions tab works offline.
 - `deploy/` — the Oracle A1 deployment (systemd unit, setup script, README).
 - `tests/` — the full offline test suite; every live client is exercised against a fake session.
 - `claw_agent_spec.md` — the original working spec (architecture, model table, data sources, build schedule).

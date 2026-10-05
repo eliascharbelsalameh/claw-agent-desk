@@ -6,10 +6,13 @@ Runs the same DeskPipeline as the CLI (agents/pipeline.py) and shows every
 stage: the context each stock got, both analysts' verdicts with their
 checked evidence, the cross-check, and each critic-loop round. The trace
 viewer replays any past run from its JSONL trace without any LLM call. The
-Architecture and Flow tabs draw the desk from its code (ui/diagrams.py).
+Architecture and Flow tabs draw the desk from its code (ui/diagrams.py); the
+Positions tab shows every trade on its price chart with the decision behind
+it, from a snapshot file (ui/snapshot.py) so it needs no network.
 """
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
@@ -23,6 +26,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from ui.charts import return_chart, trade_chart  # noqa: E402
 from ui.diagrams import (  # noqa: E402
     HANDOFFS,
     agent_rows,
@@ -42,6 +46,7 @@ from ui.support import (  # noqa: E402
     read_trace,
     summarize_trace,
 )
+from ui.trades import trade_label  # noqa: E402
 
 # Credentials must be in the process before the settings are first read.
 load_user_env()
@@ -54,6 +59,7 @@ from data_layer.llm_client import AGENT_MODELS, DEFAULT_MODEL_HEALTH, role_model
 
 LOG_DIR = Path(os.environ.get("CLAW_DESK_LOG_DIR", REPO_ROOT / "logs"))
 STATE_PATH = Path(os.environ.get("CLAW_DESK_STATE", REPO_ROOT / "state" / "desk_state.json"))
+SNAPSHOT_PATH = Path(os.environ.get("CLAW_DESK_SNAPSHOT", REPO_ROOT / "demo" / "snapshot.json"))
 FULL, DATA_ONLY = "Full desk", "Data only (no LLM calls)"
 
 st.set_page_config(page_title="Claw Agent Desk", layout="wide")
@@ -288,14 +294,111 @@ with st.sidebar:
         st.warning("Cooling (failed in the last 15 min, tried last): " + ", ".join(sorted(set(cooling))))
 
 
+def md(text) -> str:
+    """Text for st.markdown: a dollar sign would start a formula."""
+    return str(text).replace("$", "\\$")
+
+
+def _first_and_last(rows: list[dict]) -> list[dict]:
+    """Each analyst's first and final verdict of the day, in time order."""
+    keep = []
+    for role in ("analyst_1", "analyst_2"):
+        mine = [r for r in rows if r["role"] == role]
+        if mine:
+            keep += [mine[0]] + ([mine[-1]] if mine[-1] is not mine[0] else [])
+    return keep
+
+
+def render_story(story: dict, heading: str, order_reason: str) -> None:
+    """The decision behind one order: what each agent said that session."""
+    st.markdown(f"##### {heading}")
+    st.markdown(f"**Order:** {md(order_reason)}")
+    if story.get("outcome"):
+        st.markdown(f"**Desk outcome:** {md(story['outcome'])}")
+    rows = _first_and_last(story.get("analysts") or [])
+    if rows:
+        st.markdown("**Analysts**")
+        for r in rows:
+            where = "first call" if r["round"] == 0 else f"after critic round {r['round']}"
+            extra = f" · accepted {r['accepted']}, rejected {r['rejected']} challenges" if r["round"] else ""
+            st.markdown(f"- **{r['role']}** ({r['model']}), {where}: :{REC_COLORS.get(r['recommendation'], 'gray')}"
+                        f"[**{r['recommendation']}**] {r['confidence']}{extra}    \n  {md(r['thesis'])}")
+    for c in story.get("critic") or []:
+        st.markdown(f"**Critic, round {c['round']}** ({c['model']}): {md(c['assessment'])}")
+        for ch in c["challenges"]:
+            st.markdown(f"- to {ch['to']}: {md(ch['point'])}")
+    for b in story.get("bias") or []:
+        st.markdown(f"**{b['role']}** ({b['model']}): :{'red' if b['verdict'] == 'flag' else 'green'}"
+                    f"[**{b['verdict']}**] {md(b['reason'])}")
+    if story.get("bias_gate"):
+        st.markdown(f"**Bias gate:** {md(story['bias_gate'])}")
+    tech = story.get("technical")
+    if tech:
+        st.markdown(f"**Entry timing:** {tech['timing']} (4h trend {tech['trend_4h']}, support {tech['support']}, "
+                    f"resistance {tech['resistance']}) - {md(tech['reason'])}")
+    if not any([rows, story.get("critic"), story.get("bias"), tech]):
+        st.caption("No agent events for this session in the snapshot's traces.")
+
+
+def render_positions(snapshot: dict | None) -> None:
+    if snapshot is None:
+        st.info(f"No snapshot yet at {SNAPSHOT_PATH}. Build one with `python -m ui.snapshot` "
+                "(needs the traces and the Alpaca credentials once; the tab then works offline).")
+        return
+    trades = snapshot.get("trades") or []
+    account = snapshot.get("account") or {}
+    st.caption(f"Snapshot of {snapshot.get('generated_at', '')[:16].replace('T', ' ')} UTC, built from the desk's traces and "
+               "Alpaca's paper account. Paper trading over a few sessions: shown to explain decisions, not as a track record.")
+    closed = [t for t in trades if t["status"] == "closed" and t.get("pnl") is not None]
+    held = [t for t in trades if t["status"] == "open" and t.get("pnl") is not None]
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Equity", f"${account.get('equity', 0):,.0f}")
+    c2.metric("Open positions", len([t for t in trades if t["status"] == "open"]))
+    c3.metric("Closed trades", len([t for t in trades if t["status"] == "closed"]))
+    c4.metric("Realized", f"{sum(t['pnl'] for t in closed):+,.2f}")
+    c5.metric("Unrealized", f"{sum(t['pnl'] for t in held):+,.2f}")
+    if not trades:
+        st.info("The desk has not traded yet.")
+        return
+    st.dataframe([{"stock": t["symbol"], "status": t["status"], "shares": t["qty"],
+                   "bought": t["entry"]["session"], "buy price": t["entry"]["price"],
+                   "sold": (t["exit"] or {}).get("session"), "sell price": (t["exit"] or {}).get("price"),
+                   "result %": t.get("pnl_pct"), "result USD": t.get("pnl")} for t in trades],
+                 hide_index=True, width="stretch")
+    chosen = st.selectbox("Trade", range(len(trades)), format_func=lambda i: trade_label(trades[i]))
+    trade = trades[chosen]
+    st.caption("Triangles are the fills (hover for the details); the dashed line is the entry price and the shading the "
+               "holding period. Scroll to zoom the chart.")
+    st.altair_chart(trade_chart(trade), width="stretch")
+    left, right = st.columns(2)
+    with left:
+        render_story(trade["entry"]["story"], f"Why it was bought ({trade['entry']['session']})", trade["entry"]["reason"])
+    with right:
+        if trade["exit"]:
+            render_story(trade["exit"]["story"], f"Why it was sold ({trade['exit']['session']})", trade["exit"]["reason"])
+        else:
+            st.markdown("##### Still held")
+            st.markdown("The desk sells it on an agreed avoid in any morning cycle, or when its holding period ends. "
+                        "Everything else changes nothing.")
+    with st.expander("Every trade: return since entry"):
+        st.altair_chart(return_chart(trades), width="stretch")
+
+
+def load_snapshot(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
 # --- main area ---
 
 st.title("Claw Agent Desk")
 st.caption("Research demo on public and paper-trading data - not financial advice. "
            "Volume figures are IEX-only (~4% of US volume); only relative volume is meaningful.")
 
-run_tab, state_tab, trace_tab, arch_tab, flow_tab = st.tabs(
-    ["Run", "Desk state", "Trace viewer", "Architecture", "Flow"])
+run_tab, state_tab, positions_tab, trace_tab, arch_tab, flow_tab = st.tabs(
+    ["Run", "Desk state", "Positions", "Trace viewer", "Architecture", "Flow"])
 
 with run_tab:
     if start:
@@ -417,6 +520,9 @@ with state_tab:
                            "next pass (UTC)": " ".join(filter(None, [(c.get("next_pass") or {}).get("kind"),
                                                                      ((c.get("next_pass") or {}).get("due_utc") or "")[:16]]))}
                           for c in reversed(desk.cycles)], hide_index=True)
+
+with positions_tab:
+    render_positions(load_snapshot(SNAPSHOT_PATH))
 
 with trace_tab:
     files = sorted(LOG_DIR.glob("*.jsonl"), reverse=True) if LOG_DIR.exists() else []

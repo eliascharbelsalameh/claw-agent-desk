@@ -15,6 +15,7 @@ def app(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAW_DESK_NO_REGISTRY", "1")
     monkeypatch.setenv("CLAW_DESK_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("CLAW_DESK_STATE", str(tmp_path / "no-state.json"))  # never the real state file
+    monkeypatch.setenv("CLAW_DESK_SNAPSHOT", str(tmp_path / "no-snapshot.json"))  # never the real demo file
     for name in CREDENTIAL_NAMES:
         monkeypatch.setenv(name, "present-but-fake")
     patch_live_components(monkeypatch, tmp_path)
@@ -134,7 +135,7 @@ def test_desk_state_tab_shows_the_schedulers_memory(app, monkeypatch, tmp_path):
 def test_architecture_and_flow_tabs_draw_the_desk(app):
     app.run()
     assert not app.exception
-    assert [t.label for t in app.tabs][:5] == ["Run", "Desk state", "Trace viewer", "Architecture", "Flow"]
+    assert [t.label for t in app.tabs][:6] == ["Run", "Desk state", "Positions", "Trace viewer", "Architecture", "Flow"]
     charts = app.get("graphviz_chart")
     assert len(charts) == 2
     specs = [c.proto.spec for c in charts]
