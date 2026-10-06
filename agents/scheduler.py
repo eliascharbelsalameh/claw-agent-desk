@@ -44,7 +44,10 @@ AGENT_NAME = "scheduler"
 # Sept 26, 2026: every source loads and the valuation is computable). The
 # first 11 are the stocks the desk was tested on; the rest widen it beyond
 # tech (decided Sept 26). XOM was left out: SEC's data has no fiscal-2025
-# annual figures for it, so no trailing valuation; CVX covers energy.
+# annual figures for it, so no trailing valuation; CVX covers energy. Oct 6:
+# 18 more (AVGO and others) once longer cycles were acceptable; each loaded
+# with no data gap in a data-only run. V was left out: its filings give no
+# trailing EPS or share count.
 DEFAULT_WATCHLIST = (
     "AAPL", "MSFT", "NVDA", "AMD", "META", "INTC", "ADBE", "NFLX",  # tech and communication
     "CVX",                                                          # energy
@@ -54,6 +57,11 @@ DEFAULT_WATCHLIST = (
     "NKE", "HD",                                                    # consumer discretionary
     "CAT", "GE",                                                    # industrials
     "NEE",                                                          # utilities
+    "AVGO", "GOOGL", "AMZN", "TSLA", "ORCL", "CRM", "QCOM", "TXN", "AMAT", "MU",  # more tech
+    "MA", "BAC",                                                    # more financials
+    "ABBV", "JNJ",                                                  # more health care
+    "COST", "PEP", "MCD",                                           # more consumer
+    "UNP",                                                          # more industrials
 )
 # 90 minutes before the open: a full watchlist cycle took up to an hour on a
 # slow Build day (Sept 2026), and orders sent before 09:30 queue for the open.

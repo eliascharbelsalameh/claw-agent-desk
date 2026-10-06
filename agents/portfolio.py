@@ -9,7 +9,8 @@ Rules:
   it, or when the horizon it was bought for has run out: HOLDING_SESSIONS
   trading sessions after entry, inside the analysts' 2-5 trading-day
   horizon. An agreed "buy" for a stock already held starts a fresh horizon
-  instead of adding shares.
+  instead of adding shares, also when the technical agent says wait (a
+  timing call, not a doubt about the pick); a bias veto doesn't.
 - Everything else - hold, abort, deferred, a split the critic loop didn't
   resolve - changes nothing.
 - Sizing: each new position gets POSITION_FRACTION of account equity in
@@ -75,6 +76,17 @@ class Decision:
     @property
     def blocked(self) -> bool:
         return any(not g.get("passed", False) for g in self.gates)
+
+    @property
+    def reaffirms(self) -> bool:
+        """An agreed buy that keeps a held position's horizon going: nothing
+        stopped it, or only the technical agent's *wait* did (a timing call on
+        the entry, not a doubt about the pick - decided Oct 6, 2026, after NVDA
+        was sold on its date the morning its buy was only waiting)."""
+        if self.agreed != "buy":
+            return False
+        return all(g.get("passed", False) or (g.get("gate") == "technical" and g.get("outcome") == "waiting")
+                   for g in self.gates)
 
     @classmethod
     def from_run(cls, run: Any, session: str, decided_at: str) -> Decision:
@@ -183,7 +195,7 @@ class Portfolio:
             if decision is not None and decision.agreed == "avoid":
                 why = f"the desk agreed on avoid: {decision.reason}"
             elif check_horizons and pos.get("horizon_end") and session >= pos["horizon_end"] \
-                    and not (decision is not None and decision.agreed == "buy" and not decision.blocked):
+                    and not (decision is not None and decision.reaffirms):
                 why = f"its {self.holding_sessions}-session horizon ended ({pos['horizon_end']})"
             else:
                 continue
@@ -311,7 +323,6 @@ class Portfolio:
                 positions.pop(result["symbol"], None)
         for decision in decisions:
             pos = positions.get(decision.symbol)
-            if pos is not None and decision.agreed == "buy" and not decision.blocked \
-                    and pos.get("entry_session") != session:
+            if pos is not None and decision.reaffirms and pos.get("entry_session") != session:
                 pos["horizon_end"] = horizon_end
                 pos["reaffirmed"] = session

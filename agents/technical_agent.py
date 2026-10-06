@@ -96,7 +96,8 @@ class TechnicalResult:
     def gate(self) -> dict[str, Any]:
         """The entry for Decision.gates."""
         reason = self.reason if self.error is None else self.error
-        return {"gate": "technical", "passed": self.outcome == PASSED, "reason": f"{self.timing or self.outcome}: {reason}"}
+        return {"gate": "technical", "passed": self.outcome == PASSED, "outcome": self.outcome,
+                "reason": f"{self.timing or self.outcome}: {reason}"}
 
 
 def _price(value: Any) -> float | None:

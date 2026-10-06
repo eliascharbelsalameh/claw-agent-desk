@@ -53,7 +53,7 @@ Six credentials are required for a live run (Alpaca, FRED, Finnhub, SEC EDGAR us
 
 ## Status: live paper trading
 
-The desk has been running unattended on an Oracle Cloud ARM instance since Sept 28, 2026, deciding a 22-stock watchlist once daily (08:00 ET, before the open) with retries every 30 minutes through the morning, placing real paper orders on Alpaca. As of this writing it holds three open positions from agreed, cross-checked, bias-cleared, technically-timed buys — the rest of the watchlist mostly resolves to hold, with contradictory or unreachable-model cases correctly deferred or aborted rather than guessed at.
+The desk has been running unattended on an Oracle Cloud ARM instance since Sept 28, 2026, deciding a 40-stock watchlist (22 until Oct 6) once daily (08:00 ET, before the open) with retries every 30 minutes through the morning, placing real paper orders on Alpaca. As of this writing it holds three open positions from agreed, cross-checked, bias-cleared, technically-timed buys — the rest of the watchlist mostly resolves to hold, with contradictory or unreachable-model cases correctly deferred or aborted rather than guessed at.
 
 Full day-by-day findings, every model swap and why, and the live trading log are in `CLAUDE.md`.
 

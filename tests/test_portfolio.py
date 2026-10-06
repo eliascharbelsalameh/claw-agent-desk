@@ -108,6 +108,24 @@ def test_horizon_exit_only_in_the_decision_cycle_and_not_when_reaffirmed():
     assert positions["AMD"]["horizon_end"] == "2026-10-05" and positions["AMD"]["reaffirmed"] == SESSION
 
 
+def _held_amd_at_horizon_end(gates):
+    broker = FakeBroker(positions=[{"symbol": "AMD", "qty": "10"}])
+    positions = {"AMD": {"qty": 10, "entry_session": "2026-09-21", "horizon_end": SESSION}}
+    plans, _, _ = _run_step(Portfolio(broker, dry_run=False), [_decision("AMD", gates=gates)], positions)
+    return plans, positions
+
+
+def test_a_technical_wait_restarts_the_horizon_but_a_bias_veto_or_failure_does_not():
+    wait = {"gate": "technical", "passed": False, "outcome": "waiting", "reason": "wait: resistance"}
+    plans, positions = _held_amd_at_horizon_end([{"gate": "bias", "passed": True}, wait])
+    assert plans == [] and positions["AMD"]["horizon_end"] == "2026-10-05" and positions["AMD"]["reaffirmed"] == SESSION
+    for gates in ([{"gate": "bias", "passed": False, "reason": "both flag"}],
+                  [{"gate": "technical", "passed": False, "outcome": "failed", "reason": "failed: bad reply"}],
+                  [wait, {"gate": "bias", "passed": False, "reason": "both flag"}]):
+        plans, _ = _held_amd_at_horizon_end(gates)
+        assert [(p.symbol, p.side) for p in plans] == [("AMD", "sell")]
+
+
 def test_limits_gates_and_outside_positions_become_notes():
     broker = FakeBroker(positions=[{"symbol": "MSFT", "qty": "3"}])
     held = {f"H{i}": {"qty": 1, "entry_session": SESSION, "horizon_end": "2026-10-01", "dry_run": True}
