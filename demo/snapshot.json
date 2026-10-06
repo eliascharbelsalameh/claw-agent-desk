@@ -1,48 +1,325 @@
 {
- "generated_at": "2026-10-05T08:43:18.393364+00:00",
+ "generated_at": "2026-10-06T08:50:52.187309+00:00",
  "account": {
-  "equity": 99982.28,
-  "cash": 52448.54,
-  "last_equity": 99957.93
+  "equity": 100467.33,
+  "cash": 61812.71,
+  "last_equity": 100283.1
  },
  "positions": [
   {
    "symbol": "AAPL",
    "qty": 29,
    "avg_entry_price": 329.98,
-   "current_price": 332.64,
-   "unrealized_pl": 77.14
+   "current_price": 333.17,
+   "unrealized_pl": 92.51
   },
   {
    "symbol": "CAT",
    "qty": 11,
    "avg_entry_price": 842.591818,
-   "current_price": 845.62,
-   "unrealized_pl": 33.310002
+   "current_price": 852.51,
+   "unrealized_pl": 109.100002
   },
   {
-   "symbol": "LLY",
-   "qty": 8,
-   "avg_entry_price": 1187.0225,
-   "current_price": 1142.6,
-   "unrealized_pl": -355.38
+   "symbol": "MSFT",
+   "qty": 18,
+   "avg_entry_price": 525.874444,
+   "current_price": 528.0,
+   "unrealized_pl": 38.260008
   },
   {
    "symbol": "NVDA",
    "qty": 42,
    "avg_entry_price": 228.87,
-   "current_price": 235.25,
-   "unrealized_pl": 267.96
-  },
-  {
-   "symbol": "PG",
-   "qty": 66,
-   "avg_entry_price": 148.75,
-   "current_price": 144.91,
-   "unrealized_pl": -253.44
+   "current_price": 240.74,
+   "unrealized_pl": 498.54
   }
  ],
  "trades": [
+  {
+   "symbol": "MSFT",
+   "qty": 18,
+   "entry": {
+    "session": "2026-10-05",
+    "sent_at": "2026-10-05T12:17:22.387281+00:00",
+    "reason": "buy: the desk agreed on buy: after round 1: both analysts recommend buy",
+    "price": 525.874444,
+    "filled_at": "2026-10-05T13:33:34.208515Z",
+    "status": "filled",
+    "qty": 18,
+    "client_order_id": "desk-2026-10-05-MSFT-buy",
+    "story": {
+     "symbol": "MSFT",
+     "session": "2026-10-05",
+     "analysts": [
+      {
+       "role": "analyst_2",
+       "model": "nvidia/nemotron-3-super-120b-a12b",
+       "round": 0,
+       "recommendation": "buy",
+       "confidence": 0.66,
+       "thesis": "Microsoft shows solid fundamental growth with double‑digit revenue and earnings increases, and its price is trading above key short‑term moving averages while outperforming the broader market. These technical and fundamental strengths sugg…",
+       "accepted": 0,
+       "rejected": 0
+      },
+      {
+       "role": "analyst_1",
+       "model": "openai/gpt-oss-20b",
+       "round": 0,
+       "recommendation": "buy",
+       "confidence": 0.65,
+       "thesis": "Microsoft’s recent fiscal year shows strong revenue and earnings growth, and the stock is trading well above key moving averages with a healthy RSI. AI‑related momentum and a sizable backlog support near‑term upside, while the upcoming ear…",
+       "accepted": 0,
+       "rejected": 0
+      },
+      {
+       "role": "analyst_1",
+       "model": "openai/gpt-oss-20b",
+       "round": 1,
+       "recommendation": "buy",
+       "confidence": 0.75,
+       "thesis": "Microsoft’s fiscal year shows robust revenue and earnings growth, and the stock is trading well above key moving averages with a healthy RSI. AI initiatives and a sizable backlog provide near‑term upside, while the upcoming earnings window…",
+       "accepted": 0,
+       "rejected": 3
+      },
+      {
+       "role": "analyst_2",
+       "model": "nvidia/nemotron-3-super-120b-a12b",
+       "round": 1,
+       "recommendation": "buy",
+       "confidence": 0.7,
+       "thesis": "Microsoft delivered strong double‑digit revenue and earnings growth in the latest fiscal year, and its price trades above key short‑term moving averages with positive relative strength versus the SPY. These fundamentals and technical signa…",
+       "accepted": 3,
+       "rejected": 0
+      }
+     ],
+     "critic": [
+      {
+       "round": 1,
+       "model": "meta/muse-glimmer-30b",
+       "assessment": "Both analysts recommend buy and agree Microsoft shows strong YoY revenue and net income growth with price trading above the 20- and 50-day SMAs. They diverge on emphasis and evidence completeness: Analyst 1 leans on RSI, short-term momentum, a backlog visibility claim from news and macro rate pressure, while Analyst 2 stresses relative outperformance vs SPY and a cash decline risk. The divergence…",
+       "challenges": [
+        {
+         "to": "analyst_1",
+         "point": "Backlog of $678B cited as a revenue visibility driver from news[7].summary"
+        },
+        {
+         "to": "analyst_1",
+         "point": "Evidence for 52-week high proximity uses path price.high_52w"
+        },
+        {
+         "to": "analyst_1",
+         "point": "Data concern that earnings estimate for next report appears inconsistent with current EPS"
+        },
+        {
+         "to": "analyst_2",
+         "point": "Driver claims stock outperformed SPY by 0.45pp over 5 days"
+        },
+        {
+         "to": "analyst_2",
+         "point": "Driver claims price is 6.07% above the 50-day SMA"
+        },
+        {
+         "to": "analyst_2",
+         "point": "Recent news highlights AI products like Copilot supporting demand expectations"
+        }
+       ]
+      }
+     ],
+     "bias": [
+      {
+       "role": "bias_1",
+       "model": "meta/muse-glimmer-30b",
+       "verdict": "flag",
+       "reason": "The buy thesis leans on unverified news for backlog visibility and AI demand while source facts provide strong fundamentals and technicals. News-driven skew matters to the buy case."
+      },
+      {
+       "role": "bias_2",
+       "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+       "verdict": "pass",
+       "reason": "The buy case rests on verified fundamentals (revenue and earnings growth, moving‑average positions, RSI, relative‑strength vs SPY) and only briefly mentions news; sentiment is mildly positive but not decisive, and no stale or trend‑chasing issues are present."
+      }
+     ],
+     "technical": {
+      "timing": "enter",
+      "trend_4h": "up",
+      "support": 512.24,
+      "resistance": 522.805,
+      "reason": "The 4‑hour chart shows a clear uptrend with higher highs and higher lows, price above the 20‑, 50‑ and 200‑day SMAs. On the 1‑hour chart the stock pulled back to intraday support near the 4‑hour swing low (~$513.9) and then resumed upward, closing near the day’s high without showing resistance rejection or a breakdown."
+     },
+     "outcome": "agree buy: after round 1: both analysts recommend buy",
+     "bias_gate": "passed: only bias_1 flags it (The buy thesis leans on unverified news for backlog visibility and AI demand while source facts provide strong fundamentals and technicals. News-driven skew matters to the buy case.); a veto needs both bias agents"
+    }
+   },
+   "exit": null,
+   "status": "open",
+   "pnl": 38.26,
+   "pnl_pct": 0.4,
+   "now": 528.0,
+   "bars": [
+    {
+     "t": "2026-10-01T12:00:00Z",
+     "o": 518.92,
+     "h": 518.92,
+     "l": 518.92,
+     "c": 518.92
+    },
+    {
+     "t": "2026-10-01T13:00:00Z",
+     "o": 519.765,
+     "h": 522.805,
+     "l": 516.77,
+     "c": 518.12
+    },
+    {
+     "t": "2026-10-01T14:00:00Z",
+     "o": 518.26,
+     "h": 519.18,
+     "l": 513.4,
+     "c": 514.04
+    },
+    {
+     "t": "2026-10-01T15:00:00Z",
+     "o": 514.195,
+     "h": 514.85,
+     "l": 512.675,
+     "c": 513.09
+    },
+    {
+     "t": "2026-10-01T16:00:00Z",
+     "o": 513.08,
+     "h": 514.74,
+     "l": 512.24,
+     "c": 512.91
+    },
+    {
+     "t": "2026-10-01T17:00:00Z",
+     "o": 512.77,
+     "h": 516.46,
+     "l": 512.7,
+     "c": 515.09
+    },
+    {
+     "t": "2026-10-01T18:00:00Z",
+     "o": 515.115,
+     "h": 516.645,
+     "l": 514.655,
+     "c": 515.705
+    },
+    {
+     "t": "2026-10-01T19:00:00Z",
+     "o": 515.69,
+     "h": 516.33,
+     "l": 512.395,
+     "c": 512.71
+    },
+    {
+     "t": "2026-10-02T12:00:00Z",
+     "o": 518.36,
+     "h": 518.63,
+     "l": 518,
+     "c": 518.63
+    },
+    {
+     "t": "2026-10-02T13:00:00Z",
+     "o": 518.65,
+     "h": 522.46,
+     "l": 515.56,
+     "c": 517.45
+    },
+    {
+     "t": "2026-10-02T14:00:00Z",
+     "o": 517.375,
+     "h": 518.5,
+     "l": 515.69,
+     "c": 515.825
+    },
+    {
+     "t": "2026-10-02T15:00:00Z",
+     "o": 515.855,
+     "h": 516.385,
+     "l": 513.74,
+     "c": 514.33
+    },
+    {
+     "t": "2026-10-02T16:00:00Z",
+     "o": 514.4,
+     "h": 515.685,
+     "l": 513.85,
+     "c": 513.905
+    },
+    {
+     "t": "2026-10-02T17:00:00Z",
+     "o": 513.96,
+     "h": 515.11,
+     "l": 513.945,
+     "c": 514.675
+    },
+    {
+     "t": "2026-10-02T18:00:00Z",
+     "o": 514.91,
+     "h": 515.49,
+     "l": 514.415,
+     "c": 515.185
+    },
+    {
+     "t": "2026-10-02T19:00:00Z",
+     "o": 515.235,
+     "h": 517.86,
+     "l": 514.6,
+     "c": 517.32
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 520.99,
+     "h": 532.35,
+     "l": 520.75,
+     "c": 527.68
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 527.59,
+     "h": 528.565,
+     "l": 525.585,
+     "c": 526.2
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 526.19,
+     "h": 527.44,
+     "l": 524.89,
+     "c": 526.505
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 526.47,
+     "h": 526.75,
+     "l": 523.9,
+     "c": 525.82
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 525.79,
+     "h": 526.24,
+     "l": 524.6,
+     "c": 524.76
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 524.82,
+     "h": 527.42,
+     "l": 524.47,
+     "c": 527.385
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 527.44,
+     "h": 529.015,
+     "l": 524,
+     "c": 525.01
+    }
+   ]
+  },
   {
    "symbol": "CAT",
    "qty": 11,
@@ -207,9 +484,9 @@
    },
    "exit": null,
    "status": "open",
-   "pnl": 33.31,
-   "pnl_pct": 0.36,
-   "now": 845.62,
+   "pnl": 109.1,
+   "pnl_pct": 1.18,
+   "now": 852.51,
    "bars": [
     {
      "t": "2026-09-28T13:00:00Z",
@@ -455,6 +732,55 @@
      "h": 848.27,
      "l": 844.86,
      "c": 845.57
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 842.495,
+     "h": 842.495,
+     "l": 821.77,
+     "c": 832.39
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 831.63,
+     "h": 850.69,
+     "l": 829.87,
+     "c": 849.97
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 849.915,
+     "h": 849.94,
+     "l": 846.47,
+     "c": 849.53
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 849.53,
+     "h": 855.36,
+     "l": 848.965,
+     "c": 853.005
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 853.01,
+     "h": 857.58,
+     "l": 852.58,
+     "c": 857.58
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 857.83,
+     "h": 857.83,
+     "l": 853.28,
+     "c": 854.24
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 853.7,
+     "h": 855.485,
+     "l": 847.33,
+     "c": 847.835
     }
    ]
   },
@@ -565,9 +891,9 @@
    },
    "exit": null,
    "status": "open",
-   "pnl": 267.96,
-   "pnl_pct": 2.79,
-   "now": 235.25,
+   "pnl": 498.54,
+   "pnl_pct": 5.19,
+   "now": 240.74,
    "bars": [
     {
      "t": "2026-09-28T12:00:00Z",
@@ -848,6 +1174,69 @@
      "h": 234.64,
      "l": 233.6,
      "c": 234
+    },
+    {
+     "t": "2026-10-05T12:00:00Z",
+     "o": 235.32,
+     "h": 235.32,
+     "l": 235.32,
+     "c": 235.32
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 236.145,
+     "h": 237.85,
+     "l": 235.2,
+     "c": 237.27
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 237.26,
+     "h": 237.4,
+     "l": 236.415,
+     "c": 237.34
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 237.29,
+     "h": 237.43,
+     "l": 236.22,
+     "c": 236.805
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 236.85,
+     "h": 236.97,
+     "l": 236.02,
+     "c": 236.86
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 236.87,
+     "h": 237.975,
+     "l": 236.85,
+     "c": 237.58
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 237.64,
+     "h": 239.605,
+     "l": 237.49,
+     "c": 239.38
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 239.41,
+     "h": 240.09,
+     "l": 238.53,
+     "c": 238.98
+    },
+    {
+     "t": "2026-10-05T20:00:00Z",
+     "o": 238.9,
+     "h": 238.9,
+     "l": 238.9,
+     "c": 238.9
     }
    ]
   },
@@ -954,9 +1343,9 @@
    },
    "exit": null,
    "status": "open",
-   "pnl": 77.14,
-   "pnl_pct": 0.81,
-   "now": 332.64,
+   "pnl": 92.51,
+   "pnl_pct": 0.97,
+   "now": 333.17,
    "bars": [
     {
      "t": "2026-09-28T13:00:00Z",
@@ -1230,6 +1619,55 @@
      "h": 334.07,
      "l": 332.72,
      "c": 333.75
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 332.82,
+     "h": 336.19,
+     "l": 331.66,
+     "c": 333.92
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 333.885,
+     "h": 334.43,
+     "l": 332.885,
+     "c": 333.55
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 333.54,
+     "h": 334.11,
+     "l": 333.2,
+     "c": 333.59
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 333.59,
+     "h": 334.905,
+     "l": 333.275,
+     "c": 334.62
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 334.65,
+     "h": 334.75,
+     "l": 332.52,
+     "c": 332.635
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 332.65,
+     "h": 333.79,
+     "l": 332.405,
+     "c": 333.72
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 333.72,
+     "h": 334.205,
+     "l": 332.38,
+     "c": 333.11
     }
    ]
   },
@@ -1348,11 +1786,49 @@
      "bias_gate": "passed: only bias_1 flags it (Buy case is skewed by reliance on unverified news headlines for upside and by extrapolating modest recent price strength despite weak 1-day/5-day returns and low relative volume.); a veto needs both bias agents"
     }
    },
-   "exit": null,
-   "status": "open",
-   "pnl": -253.44,
-   "pnl_pct": -2.58,
-   "now": 144.91,
+   "exit": {
+    "session": "2026-10-05",
+    "sent_at": "2026-10-05T12:17:22.302556+00:00",
+    "reason": "sell: its 5-session horizon ended (2026-10-05)",
+    "price": 145.2,
+    "filled_at": "2026-10-05T13:30:47.631688Z",
+    "status": "filled",
+    "qty": 66,
+    "client_order_id": "desk-2026-10-05-PG-sell",
+    "story": {
+     "symbol": "PG",
+     "session": "2026-10-05",
+     "analysts": [
+      {
+       "role": "analyst_2",
+       "model": "nvidia/nemotron-3-super-120b-a12b",
+       "round": 0,
+       "recommendation": "avoid",
+       "confidence": 0.6,
+       "thesis": "PG shows short-term price weakness, trading below its 200-day moving average and on subdued IEX volume, while rising Treasury yields increase the opportunity cost of holding defensive equities. Earnings growth is minimal and valuation mult…",
+       "accepted": 0,
+       "rejected": 0
+      },
+      {
+       "role": "analyst_1",
+       "model": "openai/gpt-oss-20b",
+       "round": 0,
+       "recommendation": "hold",
+       "confidence": 0.62,
+       "thesis": "Procter & Gamble’s fundamentals remain solid with modest revenue and earnings growth, a healthy dividend, and a valuation that is not overly stretched. However, the stock is trading below its 20‑, 50‑, and 200‑day moving averages, with low…",
+       "accepted": 0,
+       "rejected": 0
+      }
+     ],
+     "critic": [],
+     "bias": [],
+     "technical": null,
+     "outcome": "abort: analyst_1 says hold, analyst_2 says avoid: contradictory recommendations"
+    }
+   },
+   "status": "closed",
+   "pnl": -234.3,
+   "pnl_pct": -2.39,
    "bars": [
     {
      "t": "2026-09-28T13:00:00Z",
@@ -1598,6 +2074,55 @@
      "h": 145.21,
      "l": 144.54,
      "c": 144.89
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 144.91,
+     "h": 145.705,
+     "l": 144.53,
+     "c": 144.82
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 144.9,
+     "h": 145.94,
+     "l": 144.9,
+     "c": 145.39
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 145.495,
+     "h": 145.565,
+     "l": 145.09,
+     "c": 145.38
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 145.37,
+     "h": 145.77,
+     "l": 145.33,
+     "c": 145.615
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 145.585,
+     "h": 145.625,
+     "l": 145.195,
+     "c": 145.55
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 145.59,
+     "h": 145.945,
+     "l": 145.57,
+     "c": 145.92
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 145.95,
+     "h": 146.09,
+     "l": 145.66,
+     "c": 145.96
     }
    ]
   },
@@ -1716,11 +2241,49 @@
      "bias_gate": "passed: only bias_1 flags it (Buy case leans on unverified pipeline headlines for catalysts and references stale commentary on an August raise, while fundamental support exists but is mixed with news-driven optimism.); a veto needs both bias agents"
     }
    },
-   "exit": null,
-   "status": "open",
-   "pnl": -355.38,
-   "pnl_pct": -3.74,
-   "now": 1142.6,
+   "exit": {
+    "session": "2026-10-05",
+    "sent_at": "2026-10-05T12:17:22.215953+00:00",
+    "reason": "sell: its 5-session horizon ended (2026-10-05)",
+    "price": 1155.88875,
+    "filled_at": "2026-10-05T13:33:18.951807Z",
+    "status": "filled",
+    "qty": 8,
+    "client_order_id": "desk-2026-10-05-LLY-sell",
+    "story": {
+     "symbol": "LLY",
+     "session": "2026-10-05",
+     "analysts": [
+      {
+       "role": "analyst_2",
+       "model": "nvidia/nemotron-3-super-120b-a12b",
+       "round": 0,
+       "recommendation": "hold",
+       "confidence": 0.6,
+       "thesis": "Eli Lilly shows strong quarterly revenue and earnings growth, bolstered by positive pipeline news and a cash buildup, while the stock trades above its 200‑day moving average indicating a longer‑term uptrend. However, short‑term price momen…",
+       "accepted": 0,
+       "rejected": 0
+      },
+      {
+       "role": "analyst_1",
+       "model": "openai/gpt-oss-20b",
+       "round": 0,
+       "recommendation": "hold",
+       "confidence": 0.58,
+       "thesis": "Eli Lilly’s recent earnings beat and robust pipeline give it a solid long‑term growth case, but the current price sits just below short‑term moving averages and is trading on weak relative volume. Over the next 2–5 trading days the stock i…",
+       "accepted": 0,
+       "rejected": 0
+      }
+     ],
+     "critic": [],
+     "bias": [],
+     "technical": null,
+     "outcome": "agree hold: both analysts recommend hold"
+    }
+   },
+   "status": "closed",
+   "pnl": -249.07,
+   "pnl_pct": -2.62,
    "bars": [
     {
      "t": "2026-09-28T13:00:00Z",
@@ -1966,6 +2529,55 @@
      "h": 1149.055,
      "l": 1143.54,
      "c": 1143.54
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 1151.19,
+     "h": 1162.85,
+     "l": 1149.815,
+     "c": 1161.19
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 1164.92,
+     "h": 1165.44,
+     "l": 1139.495,
+     "c": 1143.75
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 1143.54,
+     "h": 1153.625,
+     "l": 1141.63,
+     "c": 1148.43
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 1150.44,
+     "h": 1156.19,
+     "l": 1149.47,
+     "c": 1155.435
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 1155.455,
+     "h": 1155.455,
+     "l": 1151.98,
+     "c": 1152.06
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 1151.57,
+     "h": 1152.61,
+     "l": 1147.28,
+     "c": 1149.06
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 1149.4,
+     "h": 1152.03,
+     "l": 1142.98,
+     "c": 1143.7
     }
    ]
   },
@@ -2614,6 +3226,55 @@
      "h": 728.64,
      "l": 726.34,
      "c": 728.09
+    },
+    {
+     "t": "2026-10-05T13:00:00Z",
+     "o": 727.595,
+     "h": 741.16,
+     "l": 727.35,
+     "c": 737.685
+    },
+    {
+     "t": "2026-10-05T14:00:00Z",
+     "o": 737.71,
+     "h": 745.615,
+     "l": 737.42,
+     "c": 744.915
+    },
+    {
+     "t": "2026-10-05T15:00:00Z",
+     "o": 744.895,
+     "h": 746.66,
+     "l": 744.08,
+     "c": 744.605
+    },
+    {
+     "t": "2026-10-05T16:00:00Z",
+     "o": 744.46,
+     "h": 745.05,
+     "l": 742.12,
+     "c": 744.555
+    },
+    {
+     "t": "2026-10-05T17:00:00Z",
+     "o": 744.54,
+     "h": 745.57,
+     "l": 742.76,
+     "c": 742.94
+    },
+    {
+     "t": "2026-10-05T18:00:00Z",
+     "o": 743.06,
+     "h": 743.485,
+     "l": 741.89,
+     "c": 742.885
+    },
+    {
+     "t": "2026-10-05T19:00:00Z",
+     "o": 742.91,
+     "h": 744.4,
+     "l": 741.02,
+     "c": 741.685
     }
    ]
   }
