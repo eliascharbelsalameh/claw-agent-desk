@@ -89,7 +89,7 @@ STREAM_RETRIES = 2
 # entries rather than judging the pick.
 AGENT_MODELS = {
     "macro": "nvidia/nemotron-3.5-lightning-30b-a3b",
-    "analyst_1": "google/gemma-4-31b-it",
+    "analyst_1": "openai/gpt-oss-20b",
     "analyst_2": "nvidia/nemotron-3-super-120b-a12b",
     "critic": "meta/muse-glimmer-30b",
     "bias_1": "meta/muse-glimmer-30b",
@@ -131,14 +131,22 @@ AGENT_MODELS = {
 # Since then the critic and bias_1 have no usable backup (gemma, the critic's
 # other one, is analyst_1's model and always excluded): when muse-glimmer is
 # down they defer like an analyst.
+#
+# Decided Oct 6, 2026, from the server traces of Sept 28 - Oct 6: gemma-4-31b
+# answered 13 of 118 analyst_1 calls (89% failed), 4 of 23 macro calls and 1
+# of 5 critic calls, while gpt-oss-20b answered 266 of 270 (median 37 s). So
+# gpt-oss-20b is analyst_1's primary and gemma its backup, and gemma left the
+# macro, critic and technical lists: a dead backup only added minutes of
+# waiting before the next model. gpt-oss-20b backs up macro and technical
+# (never the critic: it is an analyst's model there, so it is always excluded).
 AGENT_MODEL_BACKUPS: dict[str, list[str]] = {
-    "macro": ["google/gemma-4-31b-it"],
-    "analyst_1": ["openai/gpt-oss-20b"],
+    "macro": ["openai/gpt-oss-20b"],
+    "analyst_1": ["google/gemma-4-31b-it"],
     "analyst_2": [],
-    "critic": ["google/gemma-4-31b-it"],
+    "critic": [],
     "bias_1": [],
     "bias_2": ["meta/muse-glimmer-30b"],
-    "technical": ["google/gemma-4-31b-it"],
+    "technical": ["openai/gpt-oss-20b"],
 }
 
 

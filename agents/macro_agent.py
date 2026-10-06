@@ -103,7 +103,9 @@ EARNINGS_LOOKAHEAD_DAYS = 100
 # briefing; with it off, the same prompt answered in ~20s with ~1.2k tokens
 # (both live-tested Sept 2026). The flag is Nemotron's; if the macro role is
 # ever reassigned to another family, re-check what it accepts.
-BRIEFING_MAX_TOKENS = 2048
+# Oct 6, 2026: 22 of 187 lightning briefings ended on the old 2048-token limit
+# (finish_reason length), and most of the 31 rejections were missing sections.
+BRIEFING_MAX_TOKENS = 4096
 BRIEFING_EXTRA_PARAMS = {"chat_template_kwargs": {"enable_thinking": False}}
 
 
