@@ -45,6 +45,8 @@ class DeskState:
     cycles: list[dict[str, Any]] = field(default_factory=list)
     # The trading session whose decision cycle already ran (YYYY-MM-DD).
     last_decision_session: str | None = None
+    # The session whose midday entry recheck already ran (scheduler.RECHECK_TIME_ET).
+    last_recheck_session: str | None = None
     # True for a log-only scheduler's file, False for a paper-order one's;
     # None until a scheduler first claims it.
     dry_run: bool | None = None

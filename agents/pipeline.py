@@ -279,6 +279,27 @@ class DeskPipeline:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             return list(pool.map(one, symbols))
 
+    def recheck_entries(self, symbols: list[str], workers: int = 1) -> dict[str, TechnicalResult]:
+        """The technical agent alone, on fresh data, for stocks whose agreed
+        buy it held back (the scheduler's midday recheck). No analyst, critic
+        or bias call: the pick stands as decided that morning; only the entry
+        timing is asked again, on a new facts packet (no briefing) and the
+        current 4-hour and 1-hour bars."""
+        if self.technical is None or not symbols:
+            return {}
+        shared = self.macro.prepare()
+
+        def one(symbol: str) -> tuple[str, TechnicalResult]:
+            ctx = self.macro.gather_context(symbol, shared)
+            result = self.technical.time_entry(ctx)
+            result.price = (ctx.price or {}).get("last_close")
+            return symbol, result
+
+        if workers <= 1:
+            return dict(one(s) for s in symbols)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return dict(pool.map(one, symbols))
+
     def allow_backup(self, role: str) -> bool:
         """Whether `role` may answer on a backup: at once for the roles in
         backup_at_once (the backup takes over within the call when the

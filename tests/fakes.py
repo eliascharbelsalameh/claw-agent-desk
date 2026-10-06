@@ -30,6 +30,8 @@ class FakeMacro:
     def build_context(self, symbol, shared):
         return StockContext(symbol=symbol, generated_at="t", macro=shared.macro)
 
+    gather_context = build_context
+
 
 class FakeAnalyst:
     excludes: dict = {}

@@ -36,6 +36,7 @@ from data_layer import AlpacaClient
 from .pipeline import DeskPipeline, ModelOutages, SymbolRun, default_trace_path
 from .portfolio import Decision, Portfolio
 from .state import DeskState
+from .technical_agent import PASSED, WAITING
 from .trace import TraceLogger, failures_by_hour, read_trace, summarize_trace
 
 AGENT_NAME = "scheduler"
@@ -68,6 +69,11 @@ DEFAULT_WATCHLIST = (
 DECISION_TIME_ET = time(8, 0)
 RETRY_EVERY = timedelta(minutes=30)
 RETRY_UNTIL_ET = time(15, 0)
+# Once a session (decided Oct 6, 2026), the technical agent is asked again
+# about every agreed buy it held back that morning with a wait: the pick
+# stands, only the entry is re-timed on fresh bars. 11:30 ET gives the open's
+# swings two hours to settle and leaves the afternoon to fill.
+RECHECK_TIME_ET = time(11, 30)
 POLL_SECONDS = 60
 # A state file belongs to one mode. A log-only run's file must never steer
 # a scheduler that places paper orders: it would skip the session the log-only
@@ -81,7 +87,7 @@ LOG_ONLY_STATE = "state/desk_state-log-only.json"
 # four stocks (at most two calls each at a time) keep well under it.
 WORKERS = 4
 
-DECISION, RETRY, ORDERS, IDLE = "decision", "retry", "orders", "idle"
+DECISION, RETRY, ORDERS, RECHECK, IDLE = "decision", "retry", "orders", "recheck", "idle"
 
 
 def default_state_path(paper_orders: bool) -> str:
@@ -165,6 +171,10 @@ class DeskScheduler:
         if self.state.unsent and self.state.unsent["session"] == session:
             self.send_unsent(session)
             return ORDERS
+        if (self.state.last_decision_session == session and self.state.last_recheck_session != session
+                and RECHECK_TIME_ET <= now_et.time() < RETRY_UNTIL_ET):
+            self.recheck_entries(session)
+            return RECHECK
         if self.state.pending and now_et.time() < RETRY_UNTIL_ET and (
             self._last_pass is None or self._now() - self._last_pass >= RETRY_EVERY
         ):
@@ -225,6 +235,50 @@ class DeskScheduler:
             self._save(pipeline)  # the decision and its place in `unsent` survive a restart
         orders = self._act(session, trace)
         return self._finish(RETRY, session, started, trace, pipeline, decisions, orders)
+
+    def recheck_entries(self, session: str) -> list[dict[str, Any]]:
+        """The midday pass: the technical agent re-times every agreed buy it
+        waited on this morning (a stock not already held). An *enter* turns
+        the decision into a buy, sent the usual way; a wait, a failure or an
+        unreachable model leaves things as they were - once per session."""
+        started = self._now()
+        trace = self._trace()
+        self.state.last_recheck_session = session  # once: a failed pass isn't retried in a loop
+        latest = {}
+        for d in self.state.decisions:
+            if d["session"] == session:
+                latest[d["symbol"]] = Decision(**d)  # the day's last word on each stock
+        candidates = {
+            symbol: decision for symbol, decision in latest.items()
+            if any(g.get("gate") == "technical" and g.get("outcome") == WAITING for g in decision.gates)
+            and decision.reaffirms and symbol not in self.state.positions}
+        trace.log(AGENT_NAME, "recheck_start", {"session": session, "symbols": sorted(candidates)})
+        if not candidates:
+            self._save()
+            return []
+        pipeline = self._pipeline(trace)
+        results = pipeline.recheck_entries(sorted(candidates), workers=self.workers)
+        entering = []
+        for symbol, result in sorted(results.items()):
+            if result.outcome != PASSED:
+                continue
+            old = candidates[symbol]
+            gates = [g for g in old.gates if g.get("gate") != "technical"] + [result.gate]
+            decision = Decision(symbol=symbol, session=session, outcome=old.outcome, recommendation=old.recommendation,
+                                reason=f"{old.reason} (entry timed at midday: {result.reason})",
+                                decided_at=self._now().isoformat(), price=result.price or old.price, gates=gates)
+            self.state.decisions.append(decision.to_dict())
+            self._unsent(session)["decisions"].append(decision.to_dict())
+            entering.append(symbol)
+        self._save(pipeline)
+        orders = self._act(session, trace)
+        summary = {"session": session, "started": started.isoformat(), "finished": self._now().isoformat(),
+                   "rechecked": {s: r.outcome for s, r in sorted(results.items())}, "entering": entering,
+                   "orders": orders, "dry_run": self.dry_run}
+        trace.log(AGENT_NAME, "recheck_end", summary)
+        print(f"midday recheck for session {session}: {len(results)} stocks re-timed, {len(entering)} entering, "
+              f"{sum(1 for o in orders if 'side' in o)} orders", flush=True)
+        return orders
 
     def send_unsent(self, session: str) -> list[dict[str, Any]]:
         """Send the orders of decisions a pass settled but didn't act on."""

@@ -13,6 +13,7 @@ from agents.scheduler import (
     LOG_ONLY_STATE,
     ORDERS,
     PAPER_STATE,
+    RECHECK,
     RETRY,
     RETRY_EVERY,
     DeskScheduler,
@@ -20,7 +21,7 @@ from agents.scheduler import (
     session_for,
 )
 from agents.state import DeskState
-from tests.fakes import FakeAnalyst, FakeBias, FakeCritic, _verdict
+from tests.fakes import FakeAnalyst, FakeBias, FakeCritic, FakeTechnical, _verdict
 from tests.test_portfolio import FakeBroker
 
 
@@ -48,6 +49,8 @@ class PricedMacro:
 
     def build_context(self, symbol, shared):
         return StockContext(symbol=symbol, generated_at="t", macro={}, price={"last_close": 100.0})
+
+    gather_context = build_context
 
 
 class ScriptedAnalyst(FakeAnalyst):
@@ -347,3 +350,67 @@ def test_a_failing_tick_is_logged_and_the_loop_goes_on(tmp_path):
         pass
     trace = next((tmp_path / "logs").glob("*.jsonl")).read_text(encoding="utf-8")
     assert trace.count("tick_failed") == 2 and "alpaca down" in trace
+
+
+NOON = _clock("2026-09-28T11:45:00-04:00", is_open=True, next_open="2026-09-29T09:30:00-04:00")
+
+
+def _recheck_scheduler(tmp_path, broker, box):
+    """MSFT is an agreed buy that the technical agent first says wait on."""
+    FakeTechnical.wait = {"MSFT"}
+
+    def factory(trace, outages):
+        analysts = {r: ScriptedAnalyst(None, r) for r in ("analyst_1", "analyst_2")}
+        return DeskPipeline(PricedMacro(), analysts=analysts, critic=FakeCritic(None),
+                            technical=FakeTechnical(None), trace=trace, outages=outages)
+
+    broker.get_clock = lambda: box["clock"]
+    return DeskScheduler(broker=broker, pipeline_factory=factory, state_path=tmp_path / "state.json",
+                         log_dir=tmp_path / "logs", watchlist=("MSFT", "NVDA"), dry_run=False,
+                         now=lambda: box["now"])
+
+
+def test_midday_recheck_buys_a_waiting_stock_once_the_technical_agent_says_enter(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _recheck_scheduler(tmp_path, broker, box)
+    assert sched.tick() == DECISION
+    assert broker.submitted == [] and "MSFT" not in sched.state.positions  # waiting: nothing bought
+
+    box["clock"] = MIDDAY  # 11:00 ET: too early
+    assert sched.tick() == IDLE
+    box["clock"] = NOON
+    FakeTechnical.wait = set()  # the chart now shows an entry
+    assert sched.tick() == RECHECK
+    assert [s[:3] for s in broker.submitted] == [("MSFT", 98, "buy")]
+    assert broker.submitted[0][3] == "desk-2026-09-28-MSFT-buy"
+    assert sched.state.positions["MSFT"]["horizon_end"] == "2026-10-05"
+    assert sched.state.last_recheck_session == "2026-09-28"
+    assert sched.state.decisions[-1]["gates"][-1]["outcome"] == "passed"
+    assert sched.tick() == IDLE  # once a session
+
+
+def test_midday_recheck_with_a_wait_still_or_a_held_stock_buys_nothing(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _recheck_scheduler(tmp_path, broker, box)
+    sched.tick()
+    box["clock"] = NOON
+    assert sched.tick() == RECHECK  # MSFT still waits
+    assert broker.submitted == [] and sched.state.last_recheck_session == "2026-09-28"
+
+    # a stock the desk already holds is not rechecked: waiting on it changes nothing
+    sched.state.last_recheck_session = None
+    sched.state.positions["MSFT"] = {"qty": 5, "entry_session": "2026-09-25", "horizon_end": "2026-10-02"}
+    FakeTechnical.wait = set()
+    sched.recheck_entries("2026-09-28")
+    assert broker.submitted == []
+
+
+def test_midday_recheck_without_waiting_stocks_just_marks_the_session(tmp_path):
+    broker = FakeBroker()
+    box = {"clock": PRE_MARKET, "now": T0}
+    sched = _scheduler(tmp_path, broker, box)  # no technical agent, nothing waits
+    sched.tick()
+    box["clock"] = NOON
+    assert sched.tick() == RECHECK and sched.state.last_recheck_session == "2026-09-28"

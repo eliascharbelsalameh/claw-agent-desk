@@ -792,12 +792,18 @@ class MacroContextAgent:
             macro=macro, gaps=macro_gaps + clock_gaps + benchmark_gaps, clock=clock, benchmark=benchmark
         )
 
-    def build_context(self, symbol: str, shared: SharedContext) -> StockContext:
-        """One stock's full context packet: gather, log, then brief."""
+    def gather_context(self, symbol: str, shared: SharedContext) -> StockContext:
+        """One stock's facts packet, gathered and logged, without a briefing
+        (the midday entry recheck needs fresh prices, not a new summary)."""
         ctx = self.gather_stock(
             symbol, shared.macro, shared.gaps, clock=shared.clock, benchmark=shared.benchmark
         )
         self._log("context_gathered", {"symbol": ctx.symbol, "facts": ctx.facts()})
+        return ctx
+
+    def build_context(self, symbol: str, shared: SharedContext) -> StockContext:
+        """One stock's full context packet: gather, log, then brief."""
+        ctx = self.gather_context(symbol, shared)
         self.write_briefing(ctx)
         return ctx
 

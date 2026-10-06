@@ -88,6 +88,7 @@ class TechnicalResult:
     primary_model: str | None = None
     error: str | None = None
     call_failed: bool = False
+    price: float | None = None  # the last price when asked again at midday (the recheck)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
