@@ -17,6 +17,7 @@ from agents.scheduler import (
     DECISION_TIME_ET,
     DEFAULT_WATCHLIST,
     POLL_SECONDS,
+    RECHECK_TIME_ET,
     RETRY_EVERY,
     RETRY_UNTIL_ET,
     WORKERS,
@@ -248,6 +249,12 @@ def flow_dot() -> str:
               "morning's context · dropped at", "the next session (analyzed afresh)"),
         _event("deferred", "Deferred"),
     ])
+    lines += _cluster("recheck", f"Midday recheck · {_et(RECHECK_TIME_ET)}, once a session", [
+        _node("rc_data", "api", "Fresh bars", "stocks the technical agent",
+              "held back that morning (not held)"),
+        _node("rc_tech", "agent", "Technical agent again", model("technical"), "no analyst, critic or bias call"),
+        _gate("rc_gate", "Enter\\nnow?"),
+    ])
     lines += _cluster("portfolio", "Portfolio · once per pass, after every stock", [
         _node("pf", "rule", "Plan orders", f"sell: held {HOLDING_SESSIONS} sessions, or agreed avoid",
               f"buy: {POSITION_FRACTION:.0%} of equity each · max {MAX_POSITIONS} · no margin"),
@@ -264,6 +271,11 @@ def flow_dot() -> str:
         _edge("poll", "clock", "", constraint="false"),
         _edge("due", "prep", f"decision cycle\\n{_et(DECISION_TIME_ET)}, once a session"),
         _edge("due", "resume", f"retry pass: stocks deferred\\nevery {retry} min until {_et(RETRY_UNTIL_ET)}", **defer),
+        _edge("due", "rc_data", f"midday recheck\\n{_et(RECHECK_TIME_ET)}, once a session"),
+        _edge("rc_data", "rc_tech"),
+        _edge("rc_tech", "rc_gate"),
+        _edge("rc_gate", "o_buy", "enter: the pick stands"),
+        _edge("rc_gate", "o_wait", "wait · failed · unreachable", **defer),
         _edge("prep", "gather"),
         _edge("gather", "compute"),
         _edge("compute", "brief"),
@@ -317,7 +329,7 @@ def agent_rows() -> list[dict[str, str]]:
                                                    "analyst, never its own recommendation"),
         "bias_1": ("the packet and the agreed buy", "news sentiment, three skew checks, pass or flag"),
         "bias_2": ("the same, when bias 1 flags", "the same shape"),
-        "technical": ("the packet and 4h / 1h bars", "enter or wait, the 4h trend, support and resistance"),
+        "technical": ("the packet and 4h / 1h bars (asked again at midday for a wait)", "enter or wait, the 4h trend, support and resistance"),
     }
     return [{"role": role, "model": model(role), "backup": ", ".join(backups(role)) or "none",
              "receives": jobs[role][0], "returns": jobs[role][1]} for role in AGENT_MODELS]
@@ -353,7 +365,8 @@ def outcome_rows() -> list[dict[str, str]]:
                       f"no margin); sold after {HOLDING_SESSIONS} sessions or on an agreed avoid. Already held: "
                       "the holding period restarts"},
         {"outcome": "No buy today", "when": "the technical agent names a chart reason to wait",
-         "portfolio": "nothing; the stock is analyzed afresh at the next decision cycle"},
+         "portfolio": f"nothing yet: the technical agent is asked again at {_et(RECHECK_TIME_ET)} and buys on an "
+                      "enter; otherwise the stock is analyzed afresh at the next decision cycle"},
         {"outcome": "Buy vetoed", "when": f"both bias agents flag the buy, or bias 1's flag after {solo_h} h "
                                           "without an answer from bias 2",
          "portfolio": "nothing"},
