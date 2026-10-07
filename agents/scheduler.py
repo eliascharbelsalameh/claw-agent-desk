@@ -6,7 +6,7 @@ section 7: about two days of continuous running on the Oracle A1 box).
     python -m agents.scheduler --once decision # one decision cycle now, then exit
 
 Every trading day (Alpaca's market clock decides what one is):
-- one decision cycle at DECISION_TIME_ET (08:00), before the open: every watchlist
+- one decision cycle at DECISION_TIME_ET (07:30), before the open: every watchlist
   stock, plus every stock the desk holds, gets a fresh context and the full
   desk; final decisions go to the portfolio step, whose orders queue for
   the open. Before the open the latest daily bar is a finished session, so
@@ -64,9 +64,11 @@ DEFAULT_WATCHLIST = (
     "COST", "PEP", "MCD",                                           # more consumer
     "UNP",                                                          # more industrials
 )
-# 90 minutes before the open: a full watchlist cycle took up to an hour on a
+# 120 minutes before the open: a full watchlist cycle took up to an hour on a
 # slow Build day (Sept 2026), and orders sent before 09:30 queue for the open.
-DECISION_TIME_ET = time(8, 0)
+# Moved from 08:00 on Oct 7, 2026: the 40-stock cycle took 76 minutes and its
+# orders went out 14 minutes before the open.
+DECISION_TIME_ET = time(7, 30)
 RETRY_EVERY = timedelta(minutes=30)
 RETRY_UNTIL_ET = time(15, 0)
 # Once a session (decided Oct 6, 2026), the technical agent is asked again
@@ -85,7 +87,7 @@ LOG_ONLY_STATE = "state/desk_state-log-only.json"
 # watchlist is decided before the 09:30 open (about 9 minutes per stock on
 # a slow Build morning). Build's ceiling is 40 requests/minute per model;
 # four stocks (at most two calls each at a time) keep well under it.
-WORKERS = 4
+WORKERS = 6
 
 DECISION, RETRY, ORDERS, RECHECK, IDLE = "decision", "retry", "orders", "recheck", "idle"
 

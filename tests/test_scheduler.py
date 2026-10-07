@@ -30,7 +30,7 @@ def _clock(ts, is_open=False, next_open="2026-09-28T09:30:00-04:00"):
 
 
 PRE_MARKET = _clock("2026-09-28T08:05:00-04:00")
-EARLY = _clock("2026-09-28T07:30:00-04:00")
+EARLY = _clock("2026-09-28T07:00:00-04:00")
 MIDDAY = _clock("2026-09-28T11:00:00-04:00", is_open=True, next_open="2026-09-29T09:30:00-04:00")
 AFTER_CLOSE = _clock("2026-09-28T17:00:00-04:00", next_open="2026-09-29T09:30:00-04:00")
 WEEKEND = _clock("2026-09-26T10:00:00-04:00", next_open="2026-09-28T09:30:00-04:00")
@@ -114,11 +114,11 @@ def test_a_trading_day(tmp_path, capsys):
     assert state.pending == {}
     assert state.decisions[-1]["symbol"] == "AAPL" and state.decisions[-1]["recommendation"] == "hold"
     assert state.cycles[-1]["kind"] == RETRY and state.cycles[-1]["decisions"] == {"AAPL": "agree hold"}
-    # nothing deferred: the next pass is Tuesday's decision cycle at 08:00 ET
+    # nothing deferred: the next pass is Tuesday's decision cycle at 07:30 ET
     assert state.cycles[-1]["next_pass"]["kind"] == DECISION
-    assert state.cycles[-1]["next_pass"]["due_utc"] == "2026-09-29T12:00:00+00:00"
+    assert state.cycles[-1]["next_pass"]["due_utc"] == "2026-09-29T11:30:00+00:00"
     assert "retry pass for session 2026-09-28 done: 1 decided, 0 deferred, 0 orders; " \
-           "next: decision cycle at 2026-09-29 12:00 UTC (session 2026-09-29)" in capsys.readouterr().out
+           "next: decision cycle at 2026-09-29 11:30 UTC (session 2026-09-29)" in capsys.readouterr().out
     assert sched.tick() == IDLE  # decided, nothing pending
 
     box["clock"] = AFTER_CLOSE
@@ -310,7 +310,7 @@ def test_next_pass_after_the_retry_window_is_the_next_decision_cycle(tmp_path):
     sched.state.pending["AAPL"] = {"session": "2026-09-28"}
     sched.state.last_decision_session = "2026-09-28"
     nxt = sched._next_pass("2026-09-28")
-    assert nxt["kind"] == DECISION and nxt["due_utc"] == "2026-09-29T12:00:00+00:00"
+    assert nxt["kind"] == DECISION and nxt["due_utc"] == "2026-09-29T11:30:00+00:00"
     assert nxt["note"] == "session 2026-09-29; the 1 deferred are dropped then"
 
     def broken_clock():

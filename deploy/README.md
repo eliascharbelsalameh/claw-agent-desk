@@ -81,7 +81,7 @@ The unit runs with `--paper-orders`, so its orders go to the Alpaca **paper** ac
 (`ALPACA_TRADING_BASE_URL`, which defaults to `paper-api.alpaca.markets`). Drop the flag in the unit for
 log-only.
 
-The scheduler wakes every minute. It runs the day's decision cycle at 08:00 ET, before the open,
+The scheduler wakes every minute. It runs the day's decision cycle at 07:30 ET, before the open,
 and retries deferred stocks every 30 minutes until 15:00 ET. It follows Alpaca's market clock, so
 weekends and holidays are skipped whatever the server's time zone is. Restarts are safe: the state
 file records what was already decided, and order ids are derived from the decision, so an order is
@@ -141,7 +141,7 @@ Oracle console. Local port 8502 keeps it apart from an app running on your PC (8
 session stops the app; the scheduler keeps running.
 
 - **Desk state** lists positions, deferred stocks, decisions and every pass, including LLM calls and
-  failures and when the next pass is due. It stays empty until the service's first decision cycle (08:00 ET), because the scheduler
+  failures and when the next pass is due. It stays empty until the service's first decision cycle (07:30 ET), because the scheduler
   only writes its state file during a pass. Log-only runs keep theirs in
   `state/desk_state-log-only.json`. To see it, start the app with
   `CLAW_DESK_STATE=state/desk_state-log-only.json` in front of the command.

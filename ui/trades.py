@@ -43,7 +43,7 @@ def decision_story(events: Iterable[dict[str, Any]], symbol: str, session: str) 
     """What the desk said about one stock on one session's cycle: both
     analysts (first and last round), the critic's challenges, the cross-check,
     the bias checks and the entry timing. A cycle and its retries all fall on
-    the session's date (the decision cycle starts at 08:00 ET)."""
+    the session's date (the decision cycle starts at 07:30 ET)."""
     mine = [e for e in events if e.get("symbol") == symbol and str(e.get("ts", ""))[:10] == session]
     story: dict[str, Any] = {"symbol": symbol, "session": session, "analysts": [], "critic": [], "bias": [],
                              "technical": None, "outcome": None}

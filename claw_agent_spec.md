@@ -116,7 +116,7 @@ Rules for the agents:
 ## 7. Demo plan
 
 - Portfolio of at least three US stocks (an idea, not a hard constraint).
-- Runs about 2 days continuously on the Oracle A1 instance (via Termius) — `python -m agents.scheduler --paper-orders` as a systemd user service (`deploy/`): one decision cycle per trading day at 08:00 ET (orders queue for the open) plus retry passes for deferred stocks every 30 minutes until 15:00 ET.
+- Runs about 2 days continuously on the Oracle A1 instance (via Termius) — `python -m agents.scheduler --paper-orders` as a systemd user service (`deploy/`): one decision cycle per trading day at 07:30 ET (orders queue for the open) plus retry passes for deferred stocks every 30 minutes until 15:00 ET.
 - The video shows timestamped decisions, agent disagreement and agreement, and at least one aborted decision.
 - Video length: 60 to 90 seconds.
 - Add a note that this is a research demo (simulated or paper trading), not financial advice.
